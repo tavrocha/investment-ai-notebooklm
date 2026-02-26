@@ -1,5 +1,6 @@
 # ==============================
 # Projeto DIO - Análise de Ativos Financeiros Brasileiros
+# Vinícius Tavares Rocha
 # ==============================
 
 import yfinance as yf
@@ -7,11 +8,10 @@ import pandas as pd
 import numpy as np
 from datetime import datetime
 import matplotlib.pyplot as plt
+from matplotlib.ticker import FuncFormatter
 
 # ------------------------------
 # Função para ler e validar data
-# Entrada do usuário: DDMMAAAA
-# Saída: YYYY-MM-DD
 # ------------------------------
 def ler_data(mensagem):
     while True:
@@ -37,22 +37,21 @@ def ler_data(mensagem):
         except ValueError:
             print("❌ Data inválida no calendário.")
 
-
 # ------------------------------
 # Principais ativos do mercado brasileiro
 # ------------------------------
 ativos = [
-    "PETR4.SA",  # petróleo
-    "VALE3.SA",  # mineração
-    "ITUB4.SA",  # banco
-    "BBDC4.SA",  # banco
-    "BBAS3.SA",  # banco
-    "WEGE3.SA",  # indústria
-    "SUZB3.SA",  # papel e celulose
-    "CPFE3.SA",  # CPFL Energia
-    "TAEE11.SA", # energia
-    "PRIO3.SA",  # petróleo
-    "MGLU3.SA"   # varejo
+    "PETR4.SA",
+    "VALE3.SA",
+    "ITUB4.SA",
+    "BBDC4.SA",
+    "BBAS3.SA",
+    "WEGE3.SA",
+    "SUZB3.SA",
+    "CPFE3.SA",
+    "TAEE11.SA",
+    "PRIO3.SA",
+    "MGLU3.SA"
 ]
 
 # ------------------------------
@@ -69,25 +68,98 @@ dados = yf.download(ativos, start=start, end=end)
 if dados.empty:
     print("⚠ Nenhum dado retornado.")
     exit()
-    
-# ------------------------------
-# Visualização gráfica dos ativos
-# ------------------------------
 
-plt.figure(figsize=(12, 6))
+# ------------------------------
+# Paleta de cores vibrantes e distintas
+# ------------------------------
+cores = [
+    "#00E5FF",  # ciano neon
+    "#FF6D00",  # laranja forte
+    "#00C853",  # verde vibrante
+    "#D500F9",  # roxo neon
+    "#FFD600",  # amarelo ouro
+    "#FF1744",  # vermelho vivo
+    "#00B0FF",  # azul brilhante
+    "#69F0AE",  # verde água
+    "#FF9100",  # laranja quente
+    "#7C4DFF",  # violeta
+    "#F50057"   # pink forte
+]
 
-for ativo in ativos:
+# ------------------------------
+# Visualização gráfica dos ativos (TEMA ESCURO PRO)
+# ------------------------------
+plt.style.use("dark_background")
+
+fig, ax = plt.subplots(figsize=(10, 5))
+
+for i, ativo in enumerate(ativos):
     try:
-        plt.plot(dados["Close"][ativo], label=ativo)
+        serie = dados["Close"][ativo].dropna()
+
+        ax.plot(
+            serie.index,
+            serie.values,
+            linewidth=3.2,
+            color=cores[i % len(cores)],
+            alpha=0.95,
+            label=ativo.replace(".SA", "")
+        )
+
     except:
         print(f"⚠ Não foi possível plotar {ativo}")
 
-plt.title("Evolução do preço de fechamento")
-plt.xlabel("Data")
-plt.ylabel("Preço (R$)")
-plt.legend()
-plt.grid(True)
+ax.set_title("Evolução do preço de fechamento", fontsize=15, fontweight="bold", pad=12)
+ax.set_xlabel("Data")
+ax.set_ylabel("Preço (R$)")
 
+ax.yaxis.set_major_formatter(
+    FuncFormatter(lambda x, _: f"R$ {x:,.0f}")
+)
+
+ax.grid(True, linestyle="--", alpha=0.2)
+ax.legend(frameon=False, ncol=2, fontsize=9)
+
+ax.spines["top"].set_visible(False)
+ax.spines["right"].set_visible(False)
+
+plt.tight_layout()
+plt.show()
+
+# ------------------------------
+# Gráfico comparativo normalizado
+# ------------------------------
+print("\n📊 Gerando gráfico comparativo de desempenho...")
+
+fig, ax = plt.subplots(figsize=(10, 5))
+
+for i, ativo in enumerate(ativos):
+    try:
+        serie = dados["Close"][ativo].dropna()
+        normalizado = (serie / serie.iloc[0]) * 100
+
+        ax.plot(
+            normalizado.index,
+            normalizado.values,
+            linewidth=3.2,
+            color=cores[i % len(cores)],
+            alpha=0.95,
+            label=ativo.replace(".SA", "")
+        )
+    except:
+        pass
+
+ax.set_title("Comparação de crescimento dos ativos (Base 100)", fontsize=15, fontweight="bold", pad=12)
+ax.set_xlabel("Data")
+ax.set_ylabel("Base 100")
+
+ax.grid(True, linestyle="--", alpha=0.2)
+ax.legend(frameon=False, ncol=2, fontsize=9)
+
+ax.spines["top"].set_visible(False)
+ax.spines["right"].set_visible(False)
+
+plt.tight_layout()
 plt.show()
 
 # ------------------------------
@@ -113,7 +185,6 @@ def analisar_ativo(df, ticker):
         "Mínimo": minimo
     }
 
-
 # ------------------------------
 # Construção da tabela comparativa
 # ------------------------------
@@ -128,9 +199,6 @@ for ativo in ativos:
 
 tabela = pd.DataFrame(analises)
 
-# ------------------------------
-# Formatação visual da tabela
-# ------------------------------
 tabela = tabela.sort_values(by="Retorno %", ascending=False)
 
 tabela["Preço Médio"] = tabela["Preço Médio"].round(2)
@@ -145,7 +213,6 @@ print(tabela.to_string(index=False))
 # ------------------------------
 # Simulação de investimento em CDB
 # ------------------------------
-
 print("\n💰 Simulador de CDB")
 
 try:
@@ -153,9 +220,7 @@ try:
     percentual_cdi = float(input("Percentual do CDI (ex: 110 para 110%): "))
     dias = int(input("Período do investimento em dias: "))
 
-    # taxa média anual do CDI (pode virar variável dinâmica no futuro)
-    taxa_cdi_anual = 0.105  # 10.5% ao ano (exemplo realista)
-
+    taxa_cdi_anual = 0.105
     taxa_anual_cdb = taxa_cdi_anual * (percentual_cdi / 100)
 
     valor_final = valor_cdb * (1 + taxa_anual_cdb) ** (dias / 365)
