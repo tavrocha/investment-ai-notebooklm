@@ -261,6 +261,73 @@ def gerar_grafico():
     canvas.get_tk_widget().pack(fill="both", expand=True)
 
 # ==============================
+# COTAÇÕES — MOEDAS + BITCOIN
+# ==============================
+MOEDAS = [
+    ("BTC",  "BTC-USD",  "₿",  "#F7931A"),
+    ("USD",  "USDBRL=X", "$",  "#00E676"),
+    ("EUR",  "EURBRL=X", "€",  "#448AFF"),
+    ("GBP",  "GBPBRL=X", "£",  "#E040FB"),
+    ("JPY",  "JPYBRL=X", "¥",  "#FF4081"),
+    ("CHF",  "CHFBRL=X", "₣",  "#FFFFFF"),
+    ("CNY",  "CNYBRL=X", "¥",  "#FF1744"),
+    ("AUD",  "AUDBRL=X", "A$", "#FFD600"),
+    ("CAD",  "CADBRL=X", "C$", "#FF9100"),
+    ("BRL",  None,        "R$", "#00E5FF"),  # referência fixa
+]
+
+# Guarda os Labels para atualizar
+_labels_cotacao = {}   # sigla -> (label_valor, label_var)
+
+def _buscar_cotacoes():
+    """Roda em thread — busca preços via history() e atualiza labels."""
+    for sigla, ticker_yf, simbolo, cor in MOEDAS:
+        if ticker_yf is None:
+            root.after(0, lambda s=sigla, sm=simbolo, c=cor:
+                       _atualizar_label_moeda(s, 1.0, sm, c, 0.0))
+            continue
+        try:
+            hist = yf.Ticker(ticker_yf).history(period="2d")
+            if hist.empty or len(hist) < 1:
+                continue
+
+            preco = float(hist["Close"].iloc[-1])
+            prev  = float(hist["Close"].iloc[-2]) if len(hist) >= 2 else preco
+            var   = ((preco - prev) / prev * 100) if prev else 0.0
+
+            root.after(0, lambda s=sigla, p=preco, sm=simbolo, c=cor, v=var:
+                       _atualizar_label_moeda(s, p, sm, c, v))
+        except Exception:
+            pass
+
+def _atualizar_label_moeda(sigla, preco, simbolo, cor, variacao):
+    if sigla not in _labels_cotacao:
+        return
+    lbl_val, lbl_var = _labels_cotacao[sigla]
+
+    if sigla == "BTC":
+        texto = f"R$ {preco:,.0f}"
+    elif sigla in ("JPY", "CNY"):
+        texto = f"R$ {preco:.4f}"
+    elif sigla == "BRL":
+        texto = "R$ 1,00"
+    else:
+        texto = f"R$ {preco:.4f}"
+
+    lbl_val.config(text=texto, fg=cor)
+
+    sinal = "▲" if variacao >= 0 else "▼"
+    cor_var = "#00E676" if variacao >= 0 else "#FF5252"
+    lbl_var.config(text=f"{sinal} {abs(variacao):.2f}%", fg=cor_var)
+
+def atualizar_cotacoes():
+    """Dispara busca em background e agenda próxima atualização em 60s."""
+    for _, lbl_val, lbl_var in [(k, v[0], v[1]) for k, v in _labels_cotacao.items()]:
+        lbl_val.config(text="...")
+    threading.Thread(target=_buscar_cotacoes, daemon=True).start()
+    root.after(60_000, atualizar_cotacoes)
+
+# ==============================
 # SIMULADOR CDB
 # ==============================
 def simular_cdb():
@@ -366,7 +433,7 @@ frame_main = tk.Frame(root, bg=BG)
 frame_main.pack(fill="both", expand=True)
 
 # ── SIDEBAR ──
-frame_sidebar = tk.Frame(frame_main, bg=CARD, width=185)
+frame_sidebar = tk.Frame(frame_main, bg=CARD, width=210)
 frame_sidebar.pack(side="left", fill="y", padx=(10, 0), pady=10)
 frame_sidebar.pack_propagate(False)
 
@@ -422,6 +489,45 @@ btn_add.pack(side="left", padx=(4, 0))
 label_status = tk.Label(frame_sidebar, text="", bg=CARD, fg="#00E676",
                          font=("Arial", 8), wraplength=160)
 label_status.pack(padx=6, pady=4)
+
+# ── PAINEL DE COTAÇÕES ──
+tk.Frame(frame_sidebar, bg="#1a2a3a", height=1).pack(fill="x", padx=6, pady=(4, 0))
+
+frame_cab_cotacao = tk.Frame(frame_sidebar, bg=CARD)
+frame_cab_cotacao.pack(fill="x", padx=6, pady=(4, 2))
+
+tk.Label(frame_cab_cotacao, text="💱  Cotações vs BRL", bg=CARD, fg=ACCENT,
+         font=("Arial", 9, "bold")).pack(side="left")
+
+tk.Button(frame_cab_cotacao, text="↻", bg=BTN, fg=ACCENT,
+          font=("Arial", 9, "bold"), relief="flat", cursor="hand2",
+          command=atualizar_cotacoes).pack(side="right")
+
+frame_cotacoes = tk.Frame(frame_sidebar, bg=CARD)
+frame_cotacoes.pack(fill="x", padx=6, pady=(0, 6))
+
+for sigla, ticker_yf, simbolo, cor in MOEDAS:
+    row = tk.Frame(frame_cotacoes, bg=CARD)
+    row.pack(fill="x", pady=1)
+
+    # Ícone colorido + sigla
+    tk.Label(row, text=f"{simbolo} {sigla}", bg=CARD, fg=cor,
+             font=("Arial", 8, "bold"), width=7, anchor="w").pack(side="left")
+
+    # Valor
+    lbl_val = tk.Label(row, text="...", bg=CARD, fg=cor,
+                       font=("Arial", 8), width=10, anchor="e")
+    lbl_val.pack(side="left")
+
+    # Variação %
+    lbl_var = tk.Label(row, text="", bg=CARD, fg="#aaaaaa",
+                       font=("Arial", 7), width=8, anchor="e")
+    lbl_var.pack(side="left")
+
+    _labels_cotacao[sigla] = (lbl_val, lbl_var)
+
+# Inicia cotações ao abrir
+root.after(500, atualizar_cotacoes)
 
 # ── CONTEÚDO DIREITO ──
 frame_conteudo = tk.Frame(frame_main, bg=BG)
