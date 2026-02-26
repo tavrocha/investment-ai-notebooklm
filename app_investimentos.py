@@ -5,7 +5,6 @@
 # ==============================
 
 import tkinter as tk
-from tkinter import ttk
 import yfinance as yf
 from datetime import datetime
 import matplotlib.pyplot as plt
@@ -16,7 +15,7 @@ from matplotlib.ticker import FuncFormatter
 # CONFIGURAÇÃO DE CORES
 # ==============================
 BG = "#0f1115"
-CARD = "#171a21"
+CARD = "#08080a"
 TXT = "#ffffff"
 BTN = "#2a2f3a"
 
@@ -32,53 +31,46 @@ ativos = [
 ]
 
 # ==============================
-# FUNÇÃO DATA
-# ==============================
-# ==============================
-# FUNÇÃO DATA (VALIDAÇÃO REAL)
+# FUNÇÃO DATA COM VALIDAÇÃO REAL
 # ==============================
 def formatar_data(valor):
     if len(valor) != 8 or not valor.isdigit():
         return None
-
     try:
         data = datetime.strptime(valor, "%d%m%Y")
-
-        # bloqueia datas futuras
         if data > datetime.now():
             return None
-
         return data.strftime("%Y-%m-%d")
-
     except ValueError:
-        # pega datas inexistentes tipo 31/02
         return None
 
 # ==============================
-# FUNÇÃO GERAR GRÁFICO
+# FUNÇÃO GERAR GRÁFICO (CORRIGIDA)
 # ==============================
 def gerar_grafico():
+
     for widget in frame_grafico.winfo_children():
         widget.destroy()
 
     start = formatar_data(entry_inicio.get())
     end = formatar_data(entry_fim.get())
-    if start >= end:
-        erro = tk.Label(  
-            frame_grafico,
-            text="Data final deve ser maior que a data inicial.",
-            fg="#FF5252",
-            bg=CARD
-            )
-        erro.pack(pady=20)
-        return
 
     if not start or not end:
         erro = tk.Label(frame_grafico, text="Data inválida. Use DDMMAAAA real.", fg="#FF5252", bg=CARD)
         erro.pack(pady=20)
         return
 
+    if start >= end:
+        erro = tk.Label(frame_grafico, text="Data final deve ser maior que a inicial.", fg="#FF5252", bg=CARD)
+        erro.pack(pady=20)
+        return
+
     dados = yf.download(ativos, start=start, end=end)
+
+    if dados.empty:
+        erro = tk.Label(frame_grafico, text="Nenhum dado retornado.", fg="#FF5252", bg=CARD)
+        erro.pack(pady=20)
+        return
 
     fig, ax = plt.subplots(figsize=(10, 5))
     fig.patch.set_facecolor(BG)
@@ -91,7 +83,7 @@ def gerar_grafico():
                 serie.index,
                 serie.values,
                 linewidth=3,
-                color=CORES_ATIVOS[i],
+                color=CORES_ATIVOS[i % len(CORES_ATIVOS)],
                 label=ativo.replace(".SA", "")
             )
         except:
@@ -104,8 +96,12 @@ def gerar_grafico():
         FuncFormatter(lambda x, _: f"R$ {x:,.0f}")
     )
 
-    ax.tick_params(colors=TXT)
-    ax.legend(frameon=False, ncol=2, fontsize=8)
+    leg = ax.legend(frameon=False, ncol=2, fontsize=9)
+    for text in leg.get_texts():
+        text.set_color("#FFFFFF")
+
+    ax.tick_params(axis="x", colors="#FFFFFF")
+    ax.tick_params(axis="y", colors="#FFFFFF")
 
     for spine in ax.spines.values():
         spine.set_color("#444")
@@ -118,17 +114,13 @@ def gerar_grafico():
     canvas.get_tk_widget().pack(fill="both", expand=True)
 
 # ==============================
-# FUNÇÃO CDB
+# FUNÇÃO CDB (100% FUNCIONAL)
 # ==============================
 def simular_cdb():
-    texto_valor = entry_valor.get().strip()
-    texto_cdi = entry_cdi.get().strip()
-    texto_dias = entry_dias.get().strip()
-
     try:
-        valor = float(texto_valor)
-        percentual = float(texto_cdi)
-        dias = int(texto_dias)
+        valor = float(entry_valor.get())
+        percentual = float(entry_cdi.get())
+        dias = int(entry_dias.get())
 
         if valor <= 0 or percentual <= 0 or dias <= 0:
             raise ValueError
@@ -140,15 +132,22 @@ def simular_cdb():
         rendimento = final - valor
 
         resultado_cdb.config(
-            text=f"Valor final: R$ {final:.2f} | Lucro: R$ {rendimento:.2f}",
+            text=f"Valor final: R$ {final:,.2f} | Lucro: R$ {rendimento:,.2f}",
             fg="#00E676"
         )
 
     except:
         resultado_cdb.config(
-            text="Digite valores numéricos válidos",
+            text="Preencha os campos com números válidos",
             fg="#FF5252"
         )
+
+# ==============================
+# REMOVE TEXTO PADRÃO AO CLICAR
+# ==============================
+def limpar_placeholder(entry, texto):
+    if entry.get() == texto:
+        entry.delete(0, tk.END)
 
 # ==============================
 # JANELA PRINCIPAL
@@ -192,15 +191,18 @@ linha_inputs = tk.Frame(frame_cdb, bg=CARD)
 linha_inputs.pack()
 
 entry_valor = tk.Entry(linha_inputs, width=12)
-entry_valor.insert(0, "Valor R$")
+entry_valor.insert(0, "Valor")
+entry_valor.bind("<FocusIn>", lambda e: limpar_placeholder(entry_valor, "Valor"))
 entry_valor.pack(side="left", padx=5)
 
 entry_cdi = tk.Entry(linha_inputs, width=12)
-entry_cdi.insert(0, "% CDI")
+entry_cdi.insert(0, "%CDI")
+entry_cdi.bind("<FocusIn>", lambda e: limpar_placeholder(entry_cdi, "%CDI"))
 entry_cdi.pack(side="left", padx=5)
 
 entry_dias = tk.Entry(linha_inputs, width=12)
 entry_dias.insert(0, "Dias")
+entry_dias.bind("<FocusIn>", lambda e: limpar_placeholder(entry_dias, "Dias"))
 entry_dias.pack(side="left", padx=5)
 
 tk.Button(linha_inputs, text="Simular", bg=BTN, fg=TXT, command=simular_cdb).pack(side="left", padx=10)
