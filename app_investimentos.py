@@ -183,38 +183,22 @@ def desmarcar_todos():
 # ==============================
 # GERAR GRÁFICO
 # ==============================
-def gerar_grafico():
-    for widget in frame_grafico.winfo_children():
-        widget.destroy()
+import matplotlib.dates as mdates
+import numpy as np
 
-    start = mascara_inicio.get_data_yf()
-    end   = mascara_fim.get_data_yf()
+# estado global do gráfico para tooltip
+_estado_grafico = {
+    "ax": None, "canvas": None,
+    "series": {},   # ticker -> (xs_num, ys, cor)
+    "modo": "preco" # "preco" ou "base100"
+}
 
-    if not start or not end:
-        tk.Label(frame_grafico, text="Data inválida. Use DD/MM/AAAA.",
-                 fg="#FF5252", bg=CARD).pack(pady=20)
-        return
-    if start >= end:
-        tk.Label(frame_grafico, text="Data final deve ser maior que a inicial.",
-                 fg="#FF5252", bg=CARD).pack(pady=20)
-        return
-
-    selecionados = [t for t in ativos_ordem if ativos_vars[t].get()]
-    if not selecionados:
-        tk.Label(frame_grafico, text="Selecione ao menos um ativo.",
-                 fg="#FFD600", bg=CARD).pack(pady=20)
-        return
-
-    dados = yf.download(selecionados, start=start, end=end, auto_adjust=True)
-    if dados.empty:
-        tk.Label(frame_grafico, text="Nenhum dado retornado.",
-                 fg="#FF5252", bg=CARD).pack(pady=20)
-        return
-
-    fig = plt.figure(figsize=(11, 4.5))
+def _montar_grafico(dados, selecionados, modo):
+    """Monta a figura matplotlib e retorna (fig, series_dict)."""
+    fig = plt.figure(figsize=(11, 4.2))
     fig.patch.set_facecolor(BG)
 
-    ax = fig.add_axes([0.07, 0.15, 0.68, 0.75])
+    ax = fig.add_axes([0.07, 0.16, 0.68, 0.74])
     ax.set_facecolor(BG)
 
     ax_leg = fig.add_axes([0.77, 0.05, 0.22, 0.90])
@@ -223,26 +207,49 @@ def gerar_grafico():
     for spine in ax_leg.spines.values():
         spine.set_edgecolor(ACCENT); spine.set_linewidth(1.2)
 
-    linhas, nomes = [], []
+    linhas, nomes, series = [], [], {}
 
     for ativo in selecionados:
         cor = CORES_ATIVOS[ativos_ordem.index(ativo) % len(CORES_ATIVOS)]
         try:
-            serie = (dados["Close"] if len(selecionados) == 1
-                     else dados["Close"][ativo]).dropna()
-            linha, = ax.plot(serie.index, serie.values,
-                             linewidth=2.5, color=cor, label=nome_exibicao(ativo))
+            raw = (dados["Close"] if len(selecionados) == 1
+                   else dados["Close"][ativo]).dropna()
+
+            if modo == "base100":
+                serie = (raw / raw.iloc[0]) * 100
+            else:
+                serie = raw
+
+            xs_num = mdates.date2num(serie.index.to_pydatetime())
+            ys     = serie.values.astype(float)
+
+            linha, = ax.plot(serie.index, ys, linewidth=2.5,
+                             color=cor, label=nome_exibicao(ativo))
             linhas.append(linha)
             nomes.append(nome_exibicao(ativo))
+            series[ativo] = (xs_num, ys, cor)
+
+            # Média móvel (se ativada)
+            mm = _mm_estado.get("periodo", 0)
+            if mm > 0 and len(serie) >= mm:
+                mm_serie = serie.rolling(window=mm).mean().dropna()
+                ax.plot(mm_serie.index, mm_serie.values,
+                        linewidth=1.2, color=cor, linestyle="--", alpha=0.5)
         except Exception:
             pass
 
-    ax.set_title("Evolução dos Ativos", color=TXT, fontsize=13, fontweight="bold")
-    ax.set_ylabel("Preço (R$)", color=TXT)
-    ax.yaxis.set_major_formatter(FuncFormatter(lambda x, _: f"R$ {x:,.0f}"))
+    titulo = "Desempenho Relativo (Base 100)" if modo == "base100" else "Evolução dos Ativos"
+    ylabel = "Retorno (Base 100)" if modo == "base100" else "Preço (R$)"
 
-    # Datas no eixo X: espaçadas e rotacionadas
-    import matplotlib.dates as mdates
+    ax.set_title(titulo, color=TXT, fontsize=13, fontweight="bold")
+    ax.set_ylabel(ylabel, color=TXT)
+
+    if modo == "preco":
+        ax.yaxis.set_major_formatter(FuncFormatter(lambda x, _: f"R$ {x:,.0f}"))
+    else:
+        ax.yaxis.set_major_formatter(FuncFormatter(lambda x, _: f"{x:.1f}"))
+        ax.axhline(100, color="#444", linewidth=0.8, linestyle="--")
+
     ax.xaxis.set_major_locator(mdates.MonthLocator(interval=1))
     ax.xaxis.set_major_formatter(mdates.DateFormatter("%b/%Y"))
     ax.tick_params(axis="x", colors="#FFF", rotation=35, labelsize=8)
@@ -256,9 +263,406 @@ def gerar_grafico():
                         fontsize=9, handlelength=1.5, labelspacing=0.5)
     for t in leg.get_texts(): t.set_color("#FFF")
 
+    return fig, ax, series
+
+
+def _conectar_tooltip(fig, ax, canvas, series, modo):
+    """
+    Tooltip robusto — mede distância em PIXELS para cada série,
+    só ativa se o cursor estiver a menos de 25px de alguma linha.
+    """
+    annot = ax.annotate(
+        "", xy=(0, 0), xytext=(15, 15),
+        xycoords="data", textcoords="offset points",
+        fontsize=9, color="#000000", fontweight="bold",
+        bbox=dict(boxstyle="round,pad=0.45", facecolor=ACCENT,
+                  alpha=0.92, edgecolor="none"),
+        zorder=10, visible=False
+    )
+    dot, = ax.plot([], [], "o", markersize=8, zorder=11, visible=False,
+                   markeredgecolor="#000000", markeredgewidth=0.5)
+
+    LIMIAR_PX = 25
+
+    def on_move(event):
+        if event.inaxes != ax or not series or event.xdata is None:
+            annot.set_visible(False)
+            dot.set_visible(False)
+            canvas.draw_idle()
+            return
+
+        cx, cy = event.x, event.y
+
+        melhor_ticker = None
+        melhor_dist   = float("inf")
+        melhor_xd = melhor_yd = 0.0
+        melhor_cor = ACCENT
+
+        for ticker, (xs_num, ys, cor) in series.items():
+            pts_px = ax.transData.transform(np.column_stack([xs_num, ys]))
+            dists  = np.sqrt((pts_px[:, 0] - cx)**2 + (pts_px[:, 1] - cy)**2)
+            idx    = int(np.argmin(dists))
+            d      = dists[idx]
+            if d < melhor_dist:
+                melhor_dist   = d
+                melhor_ticker = ticker
+                melhor_xd     = xs_num[idx]
+                melhor_yd     = ys[idx]
+                melhor_cor    = cor
+
+        if melhor_ticker is None or melhor_dist > LIMIAR_PX:
+            annot.set_visible(False)
+            dot.set_visible(False)
+            canvas.draw_idle()
+            return
+
+        data_str = mdates.num2date(melhor_xd).strftime("%d/%m/%Y")
+        val_str  = (f"{melhor_yd:.2f}" if modo == "base100"
+                    else f"R$ {melhor_yd:,.2f}")
+
+        annot.set_text(
+            f"  {nome_exibicao(melhor_ticker)}\n"
+            f"  📅 {data_str}\n"
+            f"  💰 {val_str}  "
+        )
+        annot.get_bbox_patch().set_facecolor(melhor_cor)
+        annot.xy = (melhor_xd, melhor_yd)
+
+        xlim  = ax.get_xlim()
+        off_x = -120 if melhor_xd > xlim[0] + (xlim[1] - xlim[0]) * 0.72 else 15
+        annot.set_position((off_x, 15))
+        annot.set_visible(True)
+
+        dot.set_data([melhor_xd], [melhor_yd])
+        dot.set_color(melhor_cor)
+        dot.set_visible(True)
+        canvas.draw_idle()
+
+    canvas.mpl_connect("motion_notify_event", on_move)
+
+
+def _montar_tabela(dados, selecionados, frame_pai):
+    """Cria tabela de análise dentro de frame_pai — usa grid no frame mestre."""
+    for w in frame_pai.winfo_children(): w.destroy()
+
+    colunas  = ["Ativo", "Início", "Fim", "Retorno %", "Volatil. %", "Risco", "Máximo", "Mínimo"]
+    larguras = [80, 85, 85, 85, 85, 70, 85, 85]
+
+    # Frame mestre com grid
+    tbl = tk.Frame(frame_pai, bg="#0d1a24")
+    tbl.pack(fill="x", padx=8)
+
+    # Cabeçalho
+    for c, (col, w) in enumerate(zip(colunas, larguras)):
+        tk.Label(tbl, text=col, bg="#0d1a24", fg=ACCENT,
+                 font=("Arial", 8, "bold"), width=w//8,
+                 anchor="center").grid(row=0, column=c, padx=1, pady=3, sticky="ew")
+
+    # Separador
+    sep = tk.Frame(tbl, bg="#1a2a3a", height=1)
+    sep.grid(row=1, column=0, columnspan=len(colunas), sticky="ew", pady=0)
+
+    # Linhas de dados
+    for idx_a, ativo in enumerate(selecionados):
+        try:
+            serie = (dados["Close"] if len(selecionados) == 1
+                     else dados["Close"][ativo]).dropna()
+
+            inicio    = float(serie.iloc[0])
+            fim       = float(serie.iloc[-1])
+            retorno   = ((fim - inicio) / inicio) * 100
+            vol       = serie.pct_change().std() * 100
+            maximo    = float(serie.max())
+            minimo    = float(serie.min())
+            cor_ativo = CORES_ATIVOS[ativos_ordem.index(ativo) % len(CORES_ATIVOS)]
+            cor_ret   = "#00E676" if retorno >= 0 else "#FF5252"
+            row_bg    = "#0a0a0f" if idx_a % 2 == 0 else "#0f0f18"
+
+            risco_txt, cor_risco = _classificar_risco(vol)
+            valores = [
+                (nome_exibicao(ativo), cor_ativo),
+                (f"R$ {inicio:.2f}",   "#cccccc"),
+                (f"R$ {fim:.2f}",      "#cccccc"),
+                (f"{retorno:+.2f}%",   cor_ret),
+                (f"{vol:.2f}%",        "#cccccc"),
+                (risco_txt,            cor_risco),
+                (f"R$ {maximo:.2f}",   "#cccccc"),
+                (f"R$ {minimo:.2f}",   "#cccccc"),
+            ]
+            r = idx_a + 2   # +2 por causa do header e separador
+            for c, (val, fg) in enumerate(valores):
+                tk.Label(tbl, text=val, bg=row_bg, fg=fg,
+                         font=("Arial", 8), width=larguras[c]//8,
+                         anchor="center").grid(row=r, column=c, padx=1, pady=2, sticky="ew")
+        except Exception:
+            pass
+
+
+# Estado da média móvel
+_mm_estado = {"periodo": 0}   # 0 = desligada
+
+def _toggle_mm(periodo):
+    """Liga/desliga média móvel e re-renderiza."""
+    if _mm_estado["periodo"] == periodo:
+        _mm_estado["periodo"] = 0
+    else:
+        _mm_estado["periodo"] = periodo
+    _atualizar_btn_mm()
+    if _cache["dados"] is not None:
+        _renderizar(_estado_grafico["modo"])
+
+def _atualizar_btn_mm():
+    p = _mm_estado["periodo"]
+    btn_mm20.config(bg=ACCENT if p == 20 else BTN,
+                    fg="#000000" if p == 20 else TXT)
+    btn_mm50.config(bg=ACCENT if p == 50 else BTN,
+                    fg="#000000" if p == 50 else TXT)
+
+# ── Análise inteligente ──
+def _calcular_analise(dados, selecionados):
+    """Calcula métricas de todos os ativos e retorna lista de dicts."""
+    analises = []
+    for ativo in selecionados:
+        try:
+            serie = (dados["Close"] if len(selecionados) == 1
+                     else dados["Close"][ativo]).dropna()
+            inicio  = float(serie.iloc[0])
+            fim     = float(serie.iloc[-1])
+            retorno = ((fim - inicio) / inicio) * 100
+            vol     = serie.pct_change().std() * 100
+            analises.append({
+                "ticker":  ativo,
+                "nome":    nome_exibicao(ativo),
+                "retorno": retorno,
+                "vol":     vol,
+                "cor":     CORES_ATIVOS[ativos_ordem.index(ativo) % len(CORES_ATIVOS)]
+            })
+        except Exception:
+            pass
+    return analises
+
+def _classificar_risco(vol):
+    if vol < 1.5:
+        return ("Baixo",  "#00E676")
+    elif vol < 2.5:
+        return ("Médio",  "#FFD600")
+    else:
+        return ("Alto",   "#FF5252")
+
+def _gerar_insights(analises):
+    """Gera frases automáticas baseadas nas métricas."""
+    if not analises: return []
+
+    por_retorno = sorted(analises, key=lambda x: x["retorno"], reverse=True)
+    por_vol     = sorted(analises, key=lambda x: x["vol"],     reverse=True)
+    por_estab   = sorted(analises, key=lambda x: x["vol"])
+
+    melhor   = por_retorno[0]
+    pior     = por_retorno[-1]
+    mais_vol = por_vol[0]
+    mais_est = por_estab[0]
+
+    frases = []
+
+    # 🏆 Top performer
+    sinal = "+" if melhor["retorno"] >= 0 else ""
+    frases.append({
+        "icone": "🏆",
+        "titulo": "Top performer",
+        "texto": f"{melhor['nome']} apresentou o maior retorno no período ({sinal}{melhor['retorno']:.2f}%).",
+        "cor": "#00E676"
+    })
+
+    # 📉 Pior desempenho
+    sinal2 = "+" if pior["retorno"] >= 0 else ""
+    frases.append({
+        "icone": "📉",
+        "titulo": "Menor retorno",
+        "texto": f"{pior['nome']} teve o menor desempenho ({sinal2}{pior['retorno']:.2f}%).",
+        "cor": "#FF5252"
+    })
+
+    # ⚠ Mais arriscado
+    risco_txt, _ = _classificar_risco(mais_vol["vol"])
+    frases.append({
+        "icone": "⚠",
+        "titulo": "Maior risco",
+        "texto": f"{mais_vol['nome']} possui alta volatilidade ({mais_vol['vol']:.2f}%) — risco {risco_txt}.",
+        "cor": "#FFD600"
+    })
+
+    # 🛡 Mais estável
+    frases.append({
+        "icone": "🛡",
+        "titulo": "Mais estável",
+        "texto": f"{mais_est['nome']} foi o ativo mais estável (vol. {mais_est['vol']:.2f}%).",
+        "cor": "#00E5FF"
+    })
+
+    # 📊 Concentração de retornos positivos
+    positivos = sum(1 for a in analises if a["retorno"] > 0)
+    total     = len(analises)
+    pct       = positivos / total * 100
+    frases.append({
+        "icone": "📊",
+        "titulo": "Visão geral",
+        "texto": f"{positivos} de {total} ativos ({pct:.0f}%) tiveram retorno positivo no período.",
+        "cor": "#aaaaaa"
+    })
+
+    return frases
+
+def _montar_insights(analises, frame_pai):
+    """Renderiza o card de insights."""
+    for w in frame_pai.winfo_children(): w.destroy()
+    frases = _gerar_insights(analises)
+
+    for f in frases:
+        row = tk.Frame(frame_pai, bg="#0d1a24")
+        row.pack(fill="x", padx=8, pady=3)
+
+        tk.Label(row, text=f["icone"], bg="#0d1a24", fg=f["cor"],
+                 font=("Arial", 11), width=2).pack(side="left", padx=(0, 6))
+
+        col = tk.Frame(row, bg="#0d1a24")
+        col.pack(side="left", fill="x", expand=True)
+
+        tk.Label(col, text=f["titulo"], bg="#0d1a24", fg=f["cor"],
+                 font=("Arial", 8, "bold"), anchor="w").pack(fill="x")
+        tk.Label(col, text=f["texto"], bg="#0d1a24", fg="#cccccc",
+                 font=("Arial", 8), anchor="w", wraplength=700).pack(fill="x")
+
+# Cache dos dados para alternar entre modos sem rebaixar
+_cache = {"dados": None, "selecionados": None}
+
+def _renderizar(modo):
+    """Renderiza gráfico + tabela no modo especificado."""
+    dados       = _cache["dados"]
+    selecionados= _cache["selecionados"]
+    if dados is None: return
+
+    _estado_grafico["modo"] = modo
+
+    # Limpa área do gráfico
+    for w in frame_grafico.winfo_children(): w.destroy()
+
+    fig, ax, series = _montar_grafico(dados, selecionados, modo)
+    _fig_atual["fig"] = fig   # guarda para exportar
     canvas = FigureCanvasTkAgg(fig, master=frame_grafico)
     canvas.draw()
     canvas.get_tk_widget().pack(fill="both", expand=True)
+    _conectar_tooltip(fig, ax, canvas, series, modo)
+
+    # Atualiza botões de modo
+    if modo == "preco":
+        btn_preco.config(bg=ACCENT, fg="#000000")
+        btn_base100.config(bg=BTN, fg=TXT)
+    else:
+        btn_base100.config(bg=ACCENT, fg="#000000")
+        btn_preco.config(bg=BTN, fg=TXT)
+
+    # Tabela
+    _montar_tabela(dados, selecionados, frame_tabela)
+
+    # Insights
+    analises = _calcular_analise(dados, selecionados)
+    _montar_insights(analises, frame_insights)
+
+
+# figura atual (para exportar PNG)
+_fig_atual = {"fig": None}
+
+def exportar_png():
+    """Salva o gráfico atual como PNG via diálogo de arquivo."""
+    fig = _fig_atual.get("fig")
+    if fig is None:
+        return
+    from tkinter import filedialog
+    caminho = filedialog.asksaveasfilename(
+        defaultextension=".png",
+        filetypes=[("Imagem PNG", "*.png"), ("Todos os arquivos", "*.*")],
+        initialfile="grafico_investimentos.png",
+        title="Salvar gráfico como..."
+    )
+    if caminho:
+        fig.savefig(caminho, dpi=150, bbox_inches="tight",
+                    facecolor=BG, edgecolor="none")
+        btn_exportar.config(text="✔ Salvo!", fg="#00E676")
+        root.after(2500, lambda: btn_exportar.config(text="📥 Exportar PNG", fg=TXT))
+
+
+def _mostrar_loading():
+    """Exibe spinner animado no frame_grafico enquanto baixa os dados."""
+    for w in frame_grafico.winfo_children(): w.destroy()
+    for w in frame_tabela.winfo_children(): w.destroy()
+
+    frame_load = tk.Frame(frame_grafico, bg=CARD)
+    frame_load.pack(expand=True)
+
+    lbl = tk.Label(frame_load, text="⏳  Baixando dados...", bg=CARD, fg=ACCENT,
+                   font=("Arial", 13, "bold"))
+    lbl.pack(pady=30)
+
+    dots = ["", ".", "..", "..."]
+    estado = {"i": 0, "ativo": True}
+
+    def animar():
+        if not estado["ativo"]: return
+        lbl.config(text=f"⏳  Baixando dados{dots[estado['i'] % 4]}")
+        estado["i"] += 1
+        root.after(400, animar)
+
+    animar()
+    return estado   # retorna para poder parar a animação
+
+
+def gerar_grafico():
+    start = mascara_inicio.get_data_yf()
+    end   = mascara_fim.get_data_yf()
+
+    if not start or not end:
+        for w in frame_grafico.winfo_children(): w.destroy()
+        tk.Label(frame_grafico, text="Data inválida. Use DD/MM/AAAA.",
+                 fg="#FF5252", bg=CARD).pack(pady=20); return
+    if start >= end:
+        for w in frame_grafico.winfo_children(): w.destroy()
+        tk.Label(frame_grafico, text="Data final deve ser maior que a inicial.",
+                 fg="#FF5252", bg=CARD).pack(pady=20); return
+
+    selecionados = [t for t in ativos_ordem if ativos_vars[t].get()]
+    if not selecionados:
+        for w in frame_grafico.winfo_children(): w.destroy()
+        tk.Label(frame_grafico, text="Selecione ao menos um ativo.",
+                 fg="#FFD600", bg=CARD).pack(pady=20); return
+
+    # Mostra loading e desabilita botão
+    estado_load = _mostrar_loading()
+    btn_gerar.config(state="disabled", text="Carregando...")
+
+    def _baixar():
+        try:
+            dados = yf.download(selecionados, start=start, end=end, auto_adjust=True)
+        except Exception:
+            dados = None
+        root.after(0, lambda: _pos_download(dados, selecionados, estado_load))
+
+    threading.Thread(target=_baixar, daemon=True).start()
+
+
+def _pos_download(dados, selecionados, estado_load):
+    """Chamado na thread principal após o download terminar."""
+    estado_load["ativo"] = False   # para animação
+    btn_gerar.config(state="normal", text="  Gerar Gráfico  ")
+
+    for w in frame_grafico.winfo_children(): w.destroy()
+
+    if dados is None or dados.empty:
+        tk.Label(frame_grafico, text="Nenhum dado retornado.",
+                 fg="#FF5252", bg=CARD).pack(pady=20); return
+
+    _cache["dados"]        = dados
+    _cache["selecionados"] = selecionados
+    _renderizar("preco")
 
 # ==============================
 # COTAÇÕES — MOEDAS + BITCOIN
@@ -426,7 +830,7 @@ def _atualizar_label_modo(*args):
 # ==============================
 root = tk.Tk()
 root.title("Dashboard de Investimentos")
-root.geometry("1200x700")
+root.geometry("1280x800")
 root.configure(bg=BG)
 
 frame_main = tk.Frame(root, bg=BG)
@@ -529,12 +933,32 @@ for sigla, ticker_yf, simbolo, cor in MOEDAS:
 # Inicia cotações ao abrir
 root.after(500, atualizar_cotacoes)
 
-# ── CONTEÚDO DIREITO ──
-frame_conteudo = tk.Frame(frame_main, bg=BG)
-frame_conteudo.pack(side="left", fill="both", expand=True, padx=10, pady=10)
+# ── CONTEÚDO DIREITO com scroll vertical ──
+frame_direito = tk.Frame(frame_main, bg=BG)
+frame_direito.pack(side="left", fill="both", expand=True)
 
-frame_topo = tk.Frame(frame_conteudo, bg=BG)
-frame_topo.pack(fill="x", pady=(0, 6))
+# Topo fixo (datas + botões) — FORA do scroll
+frame_topo = tk.Frame(frame_direito, bg=BG)
+frame_topo.pack(fill="x", padx=10, pady=(10, 6))
+
+# Canvas de scroll para o resto
+_scroll_canvas = tk.Canvas(frame_direito, bg=BG, highlightthickness=0)
+_scroll_vbar   = ttk.Scrollbar(frame_direito, orient="vertical", command=_scroll_canvas.yview)
+_scroll_canvas.configure(yscrollcommand=_scroll_vbar.set)
+_scroll_vbar.pack(side="right", fill="y")
+_scroll_canvas.pack(side="left", fill="both", expand=True)
+
+frame_conteudo = tk.Frame(_scroll_canvas, bg=BG)
+_scroll_window = _scroll_canvas.create_window((0, 0), window=frame_conteudo, anchor="nw")
+
+def _on_conteudo_configure(e):
+    _scroll_canvas.configure(scrollregion=_scroll_canvas.bbox("all"))
+def _on_canvas_configure(e):
+    _scroll_canvas.itemconfig(_scroll_window, width=e.width)
+frame_conteudo.bind("<Configure>", _on_conteudo_configure)
+_scroll_canvas.bind("<Configure>", _on_canvas_configure)
+_scroll_canvas.bind_all("<MouseWheel>",
+    lambda e: _scroll_canvas.yview_scroll(int(-1*(e.delta/120)), "units"))
 
 # Data início
 tk.Label(frame_topo, text="Data início", bg=BG, fg=TXT,
@@ -558,13 +982,71 @@ entry_fim.bind("<FocusOut>", lambda e: restaurar_placeholder(entry_fim, "DD/MM/A
 entry_fim.pack(side="left")
 mascara_fim = MascaraData(entry_fim)
 
-tk.Button(frame_topo, text="  Gerar Gráfico  ", bg=ACCENT, fg="#000000",
-          font=("Arial", 9, "bold"), relief="flat", cursor="hand2",
-          command=gerar_grafico).pack(side="left", padx=14)
+btn_gerar = tk.Button(frame_topo, text="  Gerar Gráfico  ", bg=ACCENT, fg="#000000",
+                      font=("Arial", 9, "bold"), relief="flat", cursor="hand2",
+                      command=gerar_grafico)
+btn_gerar.pack(side="left", padx=(0, 6))
+
+btn_exportar = tk.Button(frame_topo, text="📥 Exportar PNG", bg=BTN, fg=TXT,
+                         font=("Arial", 8, "bold"), relief="flat", cursor="hand2",
+                         command=exportar_png)
+btn_exportar.pack(side="left", padx=(0, 14))
+
+# Botões de alternância de modo
+btn_preco = tk.Button(frame_topo, text="Preço (R$)", bg=ACCENT, fg="#000000",
+                      font=("Arial", 8, "bold"), relief="flat", cursor="hand2",
+                      command=lambda: _renderizar("preco"))
+btn_preco.pack(side="left", padx=(0, 3))
+
+btn_base100 = tk.Button(frame_topo, text="Base 100 (%)", bg=BTN, fg=TXT,
+                        font=("Arial", 8, "bold"), relief="flat", cursor="hand2",
+                        command=lambda: _renderizar("base100"))
+btn_base100.pack(side="left")
+
+# Botões média móvel
+tk.Label(frame_topo, text="|", bg=BG, fg="#444").pack(side="left", padx=6)
+tk.Label(frame_topo, text="MM:", bg=BG, fg="#aaaaaa",
+         font=("Arial", 8)).pack(side="left", padx=(0, 3))
+
+btn_mm20 = tk.Button(frame_topo, text="20", bg=BTN, fg=TXT,
+                     font=("Arial", 8, "bold"), relief="flat", cursor="hand2",
+                     command=lambda: _toggle_mm(20))
+btn_mm20.pack(side="left", padx=(0, 2))
+
+btn_mm50 = tk.Button(frame_topo, text="50", bg=BTN, fg=TXT,
+                     font=("Arial", 8, "bold"), relief="flat", cursor="hand2",
+                     command=lambda: _toggle_mm(50))
+btn_mm50.pack(side="left")
 
 # -- GRÁFICO --
 frame_grafico = tk.Frame(frame_conteudo, bg=CARD)
 frame_grafico.pack(fill="both", expand=True)
+
+# -- TABELA DE ANÁLISE --
+frame_tabela_outer = tk.Frame(frame_conteudo, bg="#0d1a24")
+frame_tabela_outer.pack(fill="x", pady=(4, 0))
+
+tk.Label(frame_tabela_outer, text="📊  Análise do Período",
+         bg="#0d1a24", fg=ACCENT, font=("Arial", 9, "bold"),
+         pady=4).pack(anchor="w", padx=8)
+
+frame_tabela = tk.Frame(frame_tabela_outer, bg="#0d1a24")
+frame_tabela.pack(fill="x", padx=4, pady=(0, 4))
+
+# -- CARD DE INSIGHTS --
+frame_insights_outer = tk.Frame(frame_conteudo, bg="#D500F9")
+frame_insights_outer.pack(fill="x", pady=(6, 0))
+
+frame_insights_inner = tk.Frame(frame_insights_outer, bg="#0d0d1a")
+frame_insights_inner.pack(fill="both", expand=True, padx=2, pady=2)
+
+cab_ins = tk.Frame(frame_insights_inner, bg="#150015")
+cab_ins.pack(fill="x")
+tk.Label(cab_ins, text="🧠  Inteligência do Período", bg="#150015", fg="#D500F9",
+         font=("Arial", 10, "bold"), pady=6).pack(side="left", padx=12)
+
+frame_insights = tk.Frame(frame_insights_inner, bg="#0d0d1a")
+frame_insights.pack(fill="x", pady=(4, 8))
 
 # -- ÁREA DOS DOIS CARDS (CDB + META) --
 frame_cards = tk.Frame(frame_conteudo, bg=BG)
