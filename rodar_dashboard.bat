@@ -20,7 +20,7 @@ pip install yfinance matplotlib numpy --quiet
 
 :: Roda o dashboard
 echo Iniciando dashboard...
-python app-investimento.py
+python app_investimentos.py
 
 :: Se der erro, mostra a mensagem
 if errorlevel 1 (

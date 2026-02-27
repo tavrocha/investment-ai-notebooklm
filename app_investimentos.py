@@ -449,8 +449,262 @@ def _classificar_risco(vol):
     else:
         return ("Alto",   "#FF5252")
 
-def _gerar_insights(analises):
-    """Gera frases automáticas baseadas nas métricas."""
+
+# ==============================
+# SETORES DOS ATIVOS (para detecção de concentração)
+# ==============================
+SETORES = {
+    "PETR4.SA": "Energia",    "PETR3.SA": "Energia",
+    "PRIO3.SA": "Energia",    "CSAN3.SA": "Energia",
+    "VALE3.SA": "Mineração",  "CSNA3.SA": "Siderurgia",
+    "GGBR4.SA": "Siderurgia",
+    "ITUB4.SA": "Banco",      "BBDC4.SA": "Banco",
+    "BBAS3.SA": "Banco",      "SANB11.SA":"Banco",
+    "BBSE3.SA": "Seguros",
+    "WEGE3.SA": "Indústria",  "EMBR3.SA": "Indústria",
+    "SUZB3.SA": "Papel/Celulose","KLBN11.SA":"Papel/Celulose",
+    "CPFE3.SA": "Elétrico",   "TAEE11.SA":"Elétrico",
+    "EGIE3.SA": "Elétrico",   "ENGI11.SA":"Elétrico",
+    "MGLU3.SA": "Varejo",     "VIIA3.SA": "Varejo",
+    "LREN3.SA": "Varejo",
+    "RENT3.SA": "Aluguel de Veículos",
+    "RADL3.SA": "Farmácia",
+    "HAPV3.SA": "Saúde",      "RDOR3.SA": "Saúde",
+}
+
+# CDI anual base (atualizar conforme necessário)
+CDI_ANUAL = 0.1065
+
+# ==============================
+# 5. ALERTA DE TENDÊNCIA
+# ==============================
+def _tendencia_ativo(serie):
+    """
+    Compara preço atual com MM20.
+    Retorna ('Alta', cor) / ('Queda', cor) / ('Lateral', cor)
+    """
+    if len(serie) < 20:
+        return ("N/D", "#888888")
+    mm20_atual = serie.rolling(20).mean().iloc[-1]
+    preco_atual = serie.iloc[-1]
+    diff = (preco_atual - mm20_atual) / mm20_atual * 100
+    if diff > 1.5:
+        return ("↑ Alta",   "#00E676")
+    elif diff < -1.5:
+        return ("↓ Queda",  "#FF5252")
+    else:
+        return ("→ Lateral","#FFD600")
+
+# ==============================
+# 6. SCORE GERAL DA CARTEIRA (0–10)
+# ==============================
+def _calcular_score(analises):
+    """
+    Nota de 0 a 10 baseada em:
+    - 60% retorno médio normalizado
+    - 40% risco (vol) médio invertido
+    """
+    if not analises:
+        return 0.0
+    ret_medio = sum(a["retorno"] for a in analises) / len(analises)
+    vol_medio = sum(a["vol"]     for a in analises) / len(analises)
+
+    # Normaliza retorno: -20% → 0, +20% → 10
+    score_ret = max(0, min(10, (ret_medio + 20) / 4))
+    # Normaliza risco: vol 0% → 10, vol 4%+ → 0
+    score_vol = max(0, min(10, 10 - vol_medio * 2.5))
+
+    return round(score_ret * 0.6 + score_vol * 0.4, 1)
+
+def _cor_score(score):
+    if score >= 7:   return "#00E676"
+    elif score >= 4: return "#FFD600"
+    else:            return "#FF5252"
+
+# ==============================
+# 7. COMPARAÇÃO COM CDI
+# ==============================
+def _retorno_cdi_periodo(start_str, end_str):
+    """Calcula quanto o CDI rendeu no período selecionado."""
+    try:
+        d1 = datetime.strptime(start_str, "%Y-%m-%d")
+        d2 = datetime.strptime(end_str,   "%Y-%m-%d")
+        dias = (d2 - d1).days
+        return ((1 + CDI_ANUAL) ** (dias / 365) - 1) * 100
+    except Exception:
+        return None
+
+# ==============================
+# 8. DETECÇÃO DE CONCENTRAÇÃO SETORIAL
+# ==============================
+def _detectar_concentracao(selecionados):
+    """Retorna lista de alertas de concentração (setor com 2+ ativos)."""
+    contagem = {}
+    for t in selecionados:
+        setor = SETORES.get(t, "Outros")
+        contagem[setor] = contagem.get(setor, []) + [nome_exibicao(t)]
+    alertas = []
+    for setor, nomes in contagem.items():
+        if len(nomes) >= 2:
+            alertas.append(f"{setor}: {', '.join(nomes)}")
+    return alertas
+
+# ==============================
+# 9. MELHOR MÊS DA CARTEIRA
+# ==============================
+def _melhor_mes(dados, selecionados):
+    """Retorna o mês com maior retorno médio da carteira."""
+    try:
+        import pandas as pd
+        frames = []
+        for ativo in selecionados:
+            s = (dados["Close"] if len(selecionados)==1
+                 else dados["Close"][ativo]).dropna()
+            frames.append(s.pct_change().dropna())
+
+        carteira = pd.concat(frames, axis=1).mean(axis=1)
+        mensais  = carteira.resample("ME").sum() * 100
+        if mensais.empty:
+            return None, None
+        idx_max  = mensais.idxmax()
+        return idx_max.strftime("%B/%Y"), round(float(mensais.max()), 2)
+    except Exception:
+        return None, None
+
+# ==============================
+# 10. EXPORTAR RELATÓRIO PDF
+# ==============================
+def exportar_pdf():
+    """Gera PDF com gráfico + tabela de análise + insights."""
+    from tkinter import filedialog
+    import io, textwrap
+
+    fig = _fig_atual.get("fig")
+    dados        = _cache.get("dados")
+    selecionados = _cache.get("selecionados")
+
+    if fig is None or dados is None:
+        btn_pdf.config(text="⚠ Gere o gráfico primeiro", fg="#FF5252")
+        root.after(3000, lambda: btn_pdf.config(text="📄 Exportar PDF", fg=TXT))
+        return
+
+    caminho = filedialog.asksaveasfilename(
+        defaultextension=".pdf",
+        filetypes=[("PDF", "*.pdf")],
+        initialfile="relatorio_investimentos.pdf",
+        title="Salvar relatório PDF..."
+    )
+    if not caminho:
+        return
+
+    try:
+        from reportlab.lib.pagesizes import A4
+        from reportlab.lib import colors
+        from reportlab.lib.units import cm
+        from reportlab.platypus import (SimpleDocTemplate, Paragraph, Spacer,
+                                         Image, Table, TableStyle)
+        from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+        from reportlab.lib.enums import TA_CENTER, TA_LEFT
+
+        # Salva gráfico em buffer
+        buf = io.BytesIO()
+        fig.savefig(buf, format="png", dpi=120, bbox_inches="tight",
+                    facecolor=BG)
+        buf.seek(0)
+
+        doc   = SimpleDocTemplate(caminho, pagesize=A4,
+                                   leftMargin=1.5*cm, rightMargin=1.5*cm,
+                                   topMargin=1.5*cm, bottomMargin=1.5*cm)
+        story = []
+        styles = getSampleStyleSheet()
+
+        titulo_style = ParagraphStyle("titulo", fontSize=16, fontName="Helvetica-Bold",
+                                       alignment=TA_CENTER, spaceAfter=4)
+        sub_style    = ParagraphStyle("sub",    fontSize=9,  fontName="Helvetica",
+                                       alignment=TA_CENTER, textColor=colors.grey, spaceAfter=12)
+        sec_style    = ParagraphStyle("sec",    fontSize=11, fontName="Helvetica-Bold",
+                                       spaceBefore=12, spaceAfter=4)
+        body_style   = ParagraphStyle("body",   fontSize=8,  fontName="Helvetica",
+                                       spaceAfter=3, leading=12)
+
+        # Cabeçalho
+        story.append(Paragraph("Dashboard de Investimentos", titulo_style))
+        story.append(Paragraph(f"Relatório gerado em {datetime.now().strftime('%d/%m/%Y %H:%M')}", sub_style))
+
+        # Gráfico
+        story.append(Paragraph("Evolução dos Ativos", sec_style))
+        img = Image(buf, width=16*cm, height=7*cm)
+        story.append(img)
+        story.append(Spacer(1, 0.3*cm))
+
+        # Tabela de análise
+        story.append(Paragraph("Análise do Período", sec_style))
+        analises = _calcular_analise(dados, selecionados)
+
+        header = ["Ativo", "Retorno %", "Volatil. %", "Risco", "Máximo", "Mínimo"]
+        rows   = [header]
+        for a in analises:
+            s = (dados["Close"] if len(selecionados)==1
+                 else dados["Close"][ativo]).dropna()
+            try:
+                serie  = (dados["Close"] if len(selecionados)==1
+                          else dados["Close"][a["ticker"]]).dropna()
+                rows.append([
+                    a["nome"],
+                    f"{a['retorno']:+.2f}%",
+                    f"{a['vol']:.2f}%",
+                    _classificar_risco(a["vol"])[0],
+                    f"R$ {float(serie.max()):.2f}",
+                    f"R$ {float(serie.min()):.2f}",
+                ])
+            except Exception:
+                pass
+
+        tbl = Table(rows, colWidths=[3*cm,2.5*cm,2.5*cm,2*cm,3*cm,3*cm])
+        tbl.setStyle(TableStyle([
+            ("BACKGROUND", (0,0), (-1,0), colors.HexColor("#0d1a24")),
+            ("TEXTCOLOR",  (0,0), (-1,0), colors.HexColor("#00E5FF")),
+            ("FONTNAME",   (0,0), (-1,0), "Helvetica-Bold"),
+            ("FONTSIZE",   (0,0), (-1,-1), 8),
+            ("ALIGN",      (0,0), (-1,-1), "CENTER"),
+            ("ROWBACKGROUNDS", (0,1), (-1,-1),
+             [colors.HexColor("#0a0a0f"), colors.HexColor("#0f0f18")]),
+            ("TEXTCOLOR",  (0,1), (-1,-1), colors.white),
+            ("GRID",       (0,0), (-1,-1), 0.3, colors.HexColor("#1a2a3a")),
+            ("TOPPADDING", (0,0), (-1,-1), 4),
+            ("BOTTOMPADDING",(0,0),(-1,-1),4),
+        ]))
+        story.append(tbl)
+        story.append(Spacer(1, 0.4*cm))
+
+        # Score + CDI
+        score = _calcular_score(analises)
+        start_yf = _cache.get("start"); end_yf = _cache.get("end")
+        story.append(Paragraph("Inteligência do Período", sec_style))
+        story.append(Paragraph(f"Score da carteira: {score}/10", body_style))
+
+        # Insights
+        frases = _gerar_insights_completo(analises, dados, selecionados,
+                                           _cache.get("start"), _cache.get("end"))
+        for f in frases:
+            story.append(Paragraph(f"• {f['titulo']}: {f['texto']}", body_style))
+
+        doc.build(story)
+        btn_pdf.config(text="✔ PDF Salvo!", fg="#00E676")
+        root.after(3000, lambda: btn_pdf.config(text="📄 Exportar PDF", fg=TXT))
+
+    except ImportError:
+        # reportlab não instalado
+        import subprocess, sys
+        subprocess.run([sys.executable, "-m", "pip", "install", "reportlab", "--quiet"])
+        btn_pdf.config(text="Instalando... tente novamente", fg="#FFD600")
+        root.after(4000, lambda: btn_pdf.config(text="📄 Exportar PDF", fg=TXT))
+    except Exception as e:
+        btn_pdf.config(text=f"⚠ Erro", fg="#FF5252")
+        root.after(3000, lambda: btn_pdf.config(text="📄 Exportar PDF", fg=TXT))
+
+def _gerar_insights_completo(analises, dados, selecionados, start_str, end_str):
+    """Gera frases automáticas completas incluindo tendência, CDI, concentração e melhor mês."""
     if not analises: return []
 
     por_retorno = sorted(analises, key=lambda x: x["retorno"], reverse=True)
@@ -466,71 +720,156 @@ def _gerar_insights(analises):
 
     # 🏆 Top performer
     sinal = "+" if melhor["retorno"] >= 0 else ""
-    frases.append({
-        "icone": "🏆",
-        "titulo": "Top performer",
+    frases.append({"icone":"🏆","titulo":"Top performer",
         "texto": f"{melhor['nome']} apresentou o maior retorno no período ({sinal}{melhor['retorno']:.2f}%).",
-        "cor": "#00E676"
-    })
+        "cor":"#00E676"})
 
     # 📉 Pior desempenho
     sinal2 = "+" if pior["retorno"] >= 0 else ""
-    frases.append({
-        "icone": "📉",
-        "titulo": "Menor retorno",
+    frases.append({"icone":"📉","titulo":"Menor retorno",
         "texto": f"{pior['nome']} teve o menor desempenho ({sinal2}{pior['retorno']:.2f}%).",
-        "cor": "#FF5252"
-    })
+        "cor":"#FF5252"})
 
     # ⚠ Mais arriscado
     risco_txt, _ = _classificar_risco(mais_vol["vol"])
-    frases.append({
-        "icone": "⚠",
-        "titulo": "Maior risco",
+    frases.append({"icone":"⚠","titulo":"Maior risco",
         "texto": f"{mais_vol['nome']} possui alta volatilidade ({mais_vol['vol']:.2f}%) — risco {risco_txt}.",
-        "cor": "#FFD600"
-    })
+        "cor":"#FFD600"})
 
     # 🛡 Mais estável
-    frases.append({
-        "icone": "🛡",
-        "titulo": "Mais estável",
+    frases.append({"icone":"🛡","titulo":"Mais estável",
         "texto": f"{mais_est['nome']} foi o ativo mais estável (vol. {mais_est['vol']:.2f}%).",
-        "cor": "#00E5FF"
-    })
+        "cor":"#00E5FF"})
 
-    # 📊 Concentração de retornos positivos
+    # 📊 Visão geral de retornos
     positivos = sum(1 for a in analises if a["retorno"] > 0)
-    total     = len(analises)
-    pct       = positivos / total * 100
-    frases.append({
-        "icone": "📊",
-        "titulo": "Visão geral",
-        "texto": f"{positivos} de {total} ativos ({pct:.0f}%) tiveram retorno positivo no período.",
-        "cor": "#aaaaaa"
-    })
+    total = len(analises)
+    frases.append({"icone":"📊","titulo":"Visão geral",
+        "texto": f"{positivos} de {total} ativos ({positivos/total*100:.0f}%) tiveram retorno positivo.",
+        "cor":"#aaaaaa"})
+
+    # 5. Tendência por ativo
+    tendencias = {"↑ Alta": [], "↓ Queda": [], "→ Lateral": []}
+    for a in analises:
+        try:
+            serie = (dados["Close"] if len(selecionados)==1
+                     else dados["Close"][a["ticker"]]).dropna()
+            tend, _ = _tendencia_ativo(serie)
+            if tend in tendencias:
+                tendencias[tend].append(a["nome"])
+        except: pass
+    partes = []
+    if tendencias["↑ Alta"]:    partes.append(f"alta: {', '.join(tendencias['↑ Alta'])}")
+    if tendencias["↓ Queda"]:   partes.append(f"queda: {', '.join(tendencias['↓ Queda'])}")
+    if tendencias["→ Lateral"]: partes.append(f"lateral: {', '.join(tendencias['→ Lateral'])}")
+    if partes:
+        frases.append({"icone":"📡","titulo":"Tendências (MM20)",
+            "texto": "  |  ".join(partes).capitalize() + ".",
+            "cor":"#B2FF59"})
+
+    # 6. Score da carteira
+    score = _calcular_score(analises)
+    cor_s = _cor_score(score)
+    frases.append({"icone":"⭐","titulo":"Score da carteira",
+        "texto": f"{score}/10 — baseado em retorno médio e nível de risco dos ativos.",
+        "cor": cor_s})
+
+    # 7. Comparação com CDI
+    if start_str and end_str:
+        cdi_pct = _retorno_cdi_periodo(start_str, end_str)
+        if cdi_pct is not None:
+            ret_medio = sum(a["retorno"] for a in analises) / len(analises)
+            diff = ret_medio - cdi_pct
+            sinal_cdi = "acima" if diff >= 0 else "abaixo"
+            cor_cdi   = "#00E676" if diff >= 0 else "#FF5252"
+            frases.append({"icone":"🏦","titulo":"vs CDI",
+                "texto": f"Retorno médio da carteira ({ret_medio:+.2f}%) ficou {abs(diff):.2f}% {sinal_cdi} do CDI ({cdi_pct:.2f}%) no período.",
+                "cor": cor_cdi})
+
+    # 8. Concentração setorial
+    alertas = _detectar_concentracao(selecionados)
+    if alertas:
+        frases.append({"icone":"⚡","titulo":"Concentração setorial",
+            "texto": "Atenção: " + "; ".join(alertas) + ". Considere diversificar.",
+            "cor":"#FF9100"})
+
+    # 9. Melhor mês
+    mes, ret_mes = _melhor_mes(dados, selecionados)
+    if mes:
+        frases.append({"icone":"📅","titulo":"Melhor mês",
+            "texto": f"O melhor mês da carteira foi {mes} com retorno médio de {ret_mes:+.2f}%.",
+            "cor":"#EA80FC"})
 
     return frases
+
+
+def _gerar_insights(analises):
+    """Wrapper simples (sem dados extras) para compatibilidade."""
+    return _gerar_insights_completo(analises, _cache.get("dados"), _cache.get("selecionados"),
+                                     _cache.get("start"), _cache.get("end"))
+
+
+def _desenhar_score_bar(parent, score, cor):
+    """Desenha barra visual de progresso do score (0-10) ao lado do título."""
+    BAR_W = 120
+    BAR_H = 10
+
+    c = tk.Canvas(parent, width=BAR_W, height=BAR_H,
+                  bg="#0d0d1a", highlightthickness=0)
+    c.pack(side="left", padx=(8, 0), pady=1)
+
+    # Fundo
+    c.create_rectangle(0, 0, BAR_W, BAR_H,
+                        fill="#1a1a2a", outline="")
+    # Preenchimento proporcional
+    fill_w = int((score / 10) * BAR_W)
+    if fill_w > 0:
+        c.create_rectangle(0, 0, fill_w, BAR_H,
+                            fill=cor, outline="")
+    # Texto da nota à direita
+    tk.Label(parent, text=f"{score}/10", bg="#0d0d1a", fg=cor,
+             font=("Arial", 8, "bold")).pack(side="left", padx=(4, 0))
+
 
 def _montar_insights(analises, frame_pai):
     """Renderiza o card de insights."""
     for w in frame_pai.winfo_children(): w.destroy()
     frases = _gerar_insights(analises)
 
+    if not frases:
+        tk.Label(frame_pai, text="📈  Gere um gráfico para ver os insights da carteira.",
+                 bg="#0d0d1a", fg="#555555", font=("Arial", 9, "italic"),
+                 pady=14).pack()
+        return
+
     for f in frases:
-        row = tk.Frame(frame_pai, bg="#0d1a24")
-        row.pack(fill="x", padx=8, pady=3)
+        row = tk.Frame(frame_pai, bg="#0d0d1a")
+        row.pack(fill="x", padx=8, pady=2)
 
-        tk.Label(row, text=f["icone"], bg="#0d1a24", fg=f["cor"],
-                 font=("Arial", 11), width=2).pack(side="left", padx=(0, 6))
+        tk.Label(row, text=f["icone"], bg="#0d0d1a", fg=f["cor"],
+                 font=("Arial", 11), width=2).pack(side="left", padx=(0,6))
 
-        col = tk.Frame(row, bg="#0d1a24")
+        col = tk.Frame(row, bg="#0d0d1a")
         col.pack(side="left", fill="x", expand=True)
 
-        tk.Label(col, text=f["titulo"], bg="#0d1a24", fg=f["cor"],
-                 font=("Arial", 8, "bold"), anchor="w").pack(fill="x")
-        tk.Label(col, text=f["texto"], bg="#0d1a24", fg="#cccccc",
-                 font=("Arial", 8), anchor="w", wraplength=700).pack(fill="x")
+        # Linha do título + score bar (se for score)
+        titulo_row = tk.Frame(col, bg="#0d0d1a")
+        titulo_row.pack(fill="x")
+
+        tk.Label(titulo_row, text=f["titulo"], bg="#0d0d1a", fg=f["cor"],
+                 font=("Arial", 8, "bold"), anchor="w").pack(side="left")
+
+        # Barra de progresso só para o score
+        if f["titulo"] == "Score da carteira":
+            try:
+                score_val = float(f["texto"].split("/")[0])
+                _desenhar_score_bar(titulo_row, score_val, f["cor"])
+            except Exception:
+                pass
+
+        tk.Label(col, text=f["texto"], bg="#0d0d1a", fg="#cccccc",
+                 font=("Arial", 8), anchor="w", wraplength=780).pack(fill="x")
+
 
 # Cache dos dados para alternar entre modos sem rebaixar
 _cache = {"dados": None, "selecionados": None}
@@ -644,14 +983,14 @@ def gerar_grafico():
             dados = yf.download(selecionados, start=start, end=end, auto_adjust=True)
         except Exception:
             dados = None
-        root.after(0, lambda: _pos_download(dados, selecionados, estado_load))
+        root.after(0, lambda: _pos_download(dados, selecionados, estado_load, start, end))
 
     threading.Thread(target=_baixar, daemon=True).start()
 
 
-def _pos_download(dados, selecionados, estado_load):
+def _pos_download(dados, selecionados, estado_load, start, end):
     """Chamado na thread principal após o download terminar."""
-    estado_load["ativo"] = False   # para animação
+    estado_load["ativo"] = False
     btn_gerar.config(state="normal", text="  Gerar Gráfico  ")
 
     for w in frame_grafico.winfo_children(): w.destroy()
@@ -662,6 +1001,8 @@ def _pos_download(dados, selecionados, estado_load):
 
     _cache["dados"]        = dados
     _cache["selecionados"] = selecionados
+    _cache["start"]        = start
+    _cache["end"]          = end
     _renderizar("preco")
 
 # ==============================
@@ -990,7 +1331,12 @@ btn_gerar.pack(side="left", padx=(0, 6))
 btn_exportar = tk.Button(frame_topo, text="📥 Exportar PNG", bg=BTN, fg=TXT,
                          font=("Arial", 8, "bold"), relief="flat", cursor="hand2",
                          command=exportar_png)
-btn_exportar.pack(side="left", padx=(0, 14))
+btn_exportar.pack(side="left", padx=(0, 3))
+
+btn_pdf = tk.Button(frame_topo, text="📄 Exportar PDF", bg=BTN, fg=TXT,
+                    font=("Arial", 8, "bold"), relief="flat", cursor="hand2",
+                    command=exportar_pdf)
+btn_pdf.pack(side="left", padx=(0, 14))
 
 # Botões de alternância de modo
 btn_preco = tk.Button(frame_topo, text="Preço (R$)", bg=ACCENT, fg="#000000",
@@ -1178,6 +1524,578 @@ resultado_meta = tk.Label(frame_meta, text="", bg=META_BG, fg="#00E676",
                            font=("Arial", 10, "bold"), pady=5)
 resultado_meta.pack()
 
+
+# ======================================================
+# ETAPA 5 — CARTEIRA PESSOAL (Tópicos 1-5)
+# ======================================================
+import json, os, math
+
+CARTEIRA_JSON = os.path.join(os.path.dirname(os.path.abspath(__file__)), "carteira.json")
+
+# ── 1. Persistência JSON ──
+def _carregar_carteira():
+    if os.path.exists(CARTEIRA_JSON):
+        try:
+            with open(CARTEIRA_JSON, encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            pass
+    return {}   # {ticker: {qtd, preco_medio, data_compra}}
+
+def _salvar_carteira(carteira):
+    with open(CARTEIRA_JSON, "w", encoding="utf-8") as f:
+        json.dump(carteira, f, ensure_ascii=False, indent=2)
+
+_carteira = _carregar_carteira()
+
+# ── 2 & 3. Busca preço atual + cálculo de P&L ──
+
+# ======================================================
+# CARTEIRA — CDBs
+# ======================================================
+CDB_JSON = os.path.join(os.path.dirname(os.path.abspath(__file__)), "carteira_cdbs.json")
+
+def _carregar_cdbs():
+    if os.path.exists(CDB_JSON):
+        try:
+            with open(CDB_JSON, encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            pass
+    return []   # lista de dicts: {nome, valor, pct_cdi, data}
+
+def _salvar_cdbs(cdbs):
+    with open(CDB_JSON, "w", encoding="utf-8") as f:
+        json.dump(cdbs, f, ensure_ascii=False, indent=2)
+
+_cdbs = _carregar_cdbs()
+
+def _calcular_rendimento_cdb(valor, pct_cdi, data_str):
+    """Calcula rendimento bruto acumulado do CDB até hoje."""
+    try:
+        d1   = datetime.strptime(data_str, "%d/%m/%Y")
+        dias = max((datetime.now() - d1).days, 0)
+        taxa_periodo = ((1 + CDI_ANUAL * (pct_cdi/100)) ** (dias/365)) - 1
+        rendimento   = valor * taxa_periodo
+        total        = valor + rendimento
+        return rendimento, total, dias
+    except Exception:
+        return 0.0, float(valor), 0
+
+def _adicionar_cdb():
+    nome_s  = entry_cdb_nome.get().strip()
+    valor_s = entry_cdb_valor.get().strip()
+    pct_s   = entry_cdb_pct.get().strip()
+    data_s  = entry_cdb_data.get().strip()
+
+    if not nome_s or nome_s == "ex: Nubank CDB":
+        lbl_cdb_status.config(text="⚠ Digite um nome para o CDB.", fg="#FF5252"); return
+    try:
+        valor = float(valor_s.replace(",", "."))
+        pct   = float(pct_s.replace(",", "."))
+        if valor <= 0 or pct <= 0: raise ValueError
+    except ValueError:
+        lbl_cdb_status.config(text="⚠ Valor e % CDI devem ser números positivos.", fg="#FF5252"); return
+    try:
+        datetime.strptime(data_s, "%d/%m/%Y")
+    except ValueError:
+        lbl_cdb_status.config(text="⚠ Data inválida. Use DD/MM/AAAA.", fg="#FF5252"); return
+
+    _cdbs.append({"nome": nome_s, "valor": valor, "pct_cdi": pct, "data": data_s})
+    _salvar_cdbs(_cdbs)
+    lbl_cdb_status.config(text=f"✔ CDB '{nome_s}' adicionado!", fg="#00E676")
+    _renderizar_cdbs()
+
+def _remover_cdb(idx):
+    if 0 <= idx < len(_cdbs):
+        del _cdbs[idx]
+        _salvar_cdbs(_cdbs)
+        _renderizar_cdbs()
+
+def _renderizar_cdbs():
+    """Renderiza tabela de CDBs da carteira."""
+    for w in frame_cdb_cart_tabela.winfo_children(): w.destroy()
+
+    if not _cdbs:
+        tk.Label(frame_cdb_cart_tabela,
+                 text="Nenhum CDB registrado. Adicione acima.",
+                 bg="#0a0a14", fg="#555", font=("Arial", 9, "italic"), pady=10).pack()
+        return
+
+    CAB_BG = "#0d1f2d"
+    cols   = ["Nome/Banco", "Aplicado (R$)", "% CDI", "Data", "Dias", "Rendimento R$", "Total R$", "Rent. %", "Ação"]
+    widths = [13, 11, 6, 10, 5, 13, 11, 8, 5]
+
+    tbl = tk.Frame(frame_cdb_cart_tabela, bg=CAB_BG)
+    tbl.pack(fill="x", padx=6)
+
+    for c, (col, w) in enumerate(zip(cols, widths)):
+        tk.Label(tbl, text=col, bg=CAB_BG, fg="#FFD600",
+                 font=("Arial", 8, "bold"), width=w,
+                 anchor="center").grid(row=0, column=c, padx=1, pady=3, sticky="ew")
+
+    tk.Frame(tbl, bg="#1a2a1a", height=1).grid(
+        row=1, column=0, columnspan=len(cols), sticky="ew")
+
+    total_aplicado = total_rendimento = total_atual = 0
+
+    for idx, cdb in enumerate(_cdbs):
+        rend, total, dias = _calcular_rendimento_cdb(
+            cdb["valor"], cdb["pct_cdi"], cdb["data"])
+        rent_pct = (rend / cdb["valor"] * 100) if cdb["valor"] > 0 else 0
+        row_bg   = "#0a0a14" if idx % 2 == 0 else "#0d0d1a"
+        cor_rend = "#00E676"
+        ri       = idx + 2
+
+        dados_row = [
+            (cdb["nome"],                "#FFD600"),
+            (f"{cdb['valor']:,.2f}",     "#cccccc"),
+            (f"{cdb['pct_cdi']:.0f}%",  "#cccccc"),
+            (cdb["data"],                "#cccccc"),
+            (str(dias),                  "#888888"),
+            (f"{rend:+,.2f}",            cor_rend),
+            (f"{total:,.2f}",            cor_rend),
+            (f"{rent_pct:.2f}%",         cor_rend),
+        ]
+        for c, (val, fg) in enumerate(dados_row):
+            tk.Label(tbl, text=val, bg=row_bg, fg=fg,
+                     font=("Arial", 8), width=widths[c],
+                     anchor="center").grid(row=ri, column=c, padx=1, pady=2, sticky="ew")
+
+        tk.Button(tbl, text="✕", bg="#1a0a0a", fg="#FF5252",
+                  font=("Arial", 8, "bold"), relief="flat", cursor="hand2", width=2,
+                  command=lambda i=idx: _remover_cdb(i)
+                  ).grid(row=ri, column=8, padx=1, pady=2)
+
+        total_aplicado  += cdb["valor"]
+        total_rendimento += rend
+        total_atual      += total
+
+    # Linha de totais
+    rent_total_pct = (total_rendimento / total_aplicado * 100) if total_aplicado > 0 else 0
+    sep_r = len(_cdbs) + 2
+    tk.Frame(tbl, bg="#1a2a1a", height=1).grid(
+        row=sep_r, column=0, columnspan=len(cols), sticky="ew", pady=2)
+    tot_row = sep_r + 1
+    resumo = [
+        ("TOTAL",                     "#FFD600"),
+        (f"{total_aplicado:,.2f}",    "#FFD600"),
+        ("", " "), ("", " "), ("", " "),
+        (f"{total_rendimento:+,.2f}", "#00E676"),
+        (f"{total_atual:,.2f}",       "#00E676"),
+        (f"{rent_total_pct:.2f}%",    "#00E676"),
+        ("", ""),
+    ]
+    for c, (val, fg) in enumerate(resumo):
+        tk.Label(tbl, text=val, bg="#0d1f2d", fg=fg,
+                 font=("Arial", 8, "bold"), width=widths[c],
+                 anchor="center").grid(row=tot_row, column=c, padx=1, pady=3, sticky="ew")
+
+def _buscar_precos_carteira(tickers):
+    """Retorna dict {ticker: preco_atual} para todos os ativos da carteira."""
+    precos = {}
+    for t in tickers:
+        try:
+            hist = yf.Ticker(t).history(period="2d")
+            if not hist.empty:
+                precos[t] = float(hist["Close"].iloc[-1])
+        except Exception:
+            pass
+    return precos
+
+def _calcular_pl(carteira, precos):
+    """Retorna lista de dicts com P&L por ativo."""
+    rows = []
+    for ticker, pos in carteira.items():
+        preco_atual = precos.get(ticker)
+        if preco_atual is None:
+            continue
+        qtd         = float(pos["qtd"])
+        pm          = float(pos["preco_medio"])
+        custo       = qtd * pm
+        patrimonio  = qtd * preco_atual
+        lucro_rs    = patrimonio - custo
+        lucro_pct   = (lucro_rs / custo * 100) if custo > 0 else 0
+        rows.append({
+            "ticker":     ticker,
+            "nome":       nome_exibicao(ticker),
+            "qtd":        qtd,
+            "pm":         pm,
+            "preco_atual":preco_atual,
+            "custo":      custo,
+            "patrimonio": patrimonio,
+            "lucro_rs":   lucro_rs,
+            "lucro_pct":  lucro_pct,
+            "data_compra":pos.get("data_compra", "—"),
+        })
+    return rows
+
+# ── 4. Comparativo com CDI ──
+def _cdi_desde_compra(data_compra_str):
+    """Retorna quanto o CDI rendeu desde a data de compra até hoje."""
+    try:
+        d1   = datetime.strptime(data_compra_str, "%d/%m/%Y")
+        dias = (datetime.now() - d1).days
+        return ((1 + CDI_ANUAL) ** (dias / 365) - 1) * 100
+    except Exception:
+        return None
+
+# ── 5. Gráfico evolução da carteira ──
+def _grafico_evolucao_carteira(carteira, frame_pai):
+    """Plota evolução do patrimônio total da carteira desde a data de compra mais antiga."""
+    for w in frame_pai.winfo_children(): w.destroy()
+
+    if not carteira:
+        tk.Label(frame_pai, text="Adicione ativos à carteira para ver a evolução.",
+                 bg="#0a0a14", fg="#555", font=("Arial", 9, "italic"), pady=20).pack()
+        return
+
+    # Descobre data mais antiga
+    datas = []
+    for pos in carteira.values():
+        try:
+            datas.append(datetime.strptime(pos["data_compra"], "%d/%m/%Y"))
+        except Exception:
+            pass
+    if not datas:
+        return
+    start = min(datas).strftime("%Y-%m-%d")
+    end   = datetime.now().strftime("%Y-%m-%d")
+
+    tickers = list(carteira.keys())
+    try:
+        dados = yf.download(tickers, start=start, end=end, auto_adjust=True, progress=False)
+        if dados.empty:
+            return
+    except Exception:
+        return
+
+    fig = plt.figure(figsize=(11, 3.2))
+    fig.patch.set_facecolor("#0a0a14")
+    ax  = fig.add_axes([0.07, 0.18, 0.90, 0.72])
+    ax.set_facecolor("#0a0a14")
+
+    import pandas as pd
+    patrimonio_total = pd.Series(dtype=float)
+
+    for ticker, pos in carteira.items():
+        try:
+            serie = (dados["Close"] if len(tickers)==1
+                     else dados["Close"][ticker]).dropna()
+            qtd   = float(pos["qtd"])
+            val   = serie * qtd
+            patrimonio_total = patrimonio_total.add(val, fill_value=0)
+        except Exception:
+            pass
+
+    if patrimonio_total.empty:
+        return
+
+    ax.fill_between(patrimonio_total.index, patrimonio_total.values,
+                    alpha=0.25, color="#00E5FF")
+    ax.plot(patrimonio_total.index, patrimonio_total.values,
+            color="#00E5FF", linewidth=2)
+
+    ax.set_title("Evolução do Patrimônio", color=TXT, fontsize=11, fontweight="bold")
+    ax.set_ylabel("R$", color=TXT)
+    ax.yaxis.set_major_formatter(FuncFormatter(lambda x, _: f"R$ {x:,.0f}"))
+
+    import matplotlib.dates as mdates2
+    ax.xaxis.set_major_locator(mdates2.MonthLocator(interval=1))
+    ax.xaxis.set_major_formatter(mdates2.DateFormatter("%b/%Y"))
+    ax.tick_params(axis="x", colors="#FFF", rotation=30, labelsize=7)
+    ax.tick_params(axis="y", colors="#FFF")
+    for spine in ax.spines.values(): spine.set_color("#333")
+
+    canvas = FigureCanvasTkAgg(fig, master=frame_pai)
+    canvas.draw()
+    canvas.get_tk_widget().pack(fill="both", expand=True)
+
+
+# ── UI: funções de ação ──
+def _adicionar_posicao():
+    """Valida e adiciona posição à carteira."""
+    raw    = entry_cart_ticker.get().strip().upper()
+    qtd_s  = entry_cart_qtd.get().strip()
+    pm_s   = entry_cart_pm.get().strip()
+    data_s = entry_cart_data.get().strip()
+
+    if not raw or raw == "EX: PETR4":
+        lbl_cart_status.config(text="⚠ Digite o ticker.", fg="#FF5252"); return
+    ticker = raw if raw.endswith(".SA") else raw + ".SA"
+
+    try:
+        qtd = float(qtd_s.replace(",", "."))
+        pm  = float(pm_s.replace(",", "."))
+        if qtd <= 0 or pm <= 0: raise ValueError
+    except ValueError:
+        lbl_cart_status.config(text="⚠ Qtd e preço devem ser números positivos.", fg="#FF5252"); return
+
+    try:
+        datetime.strptime(data_s, "%d/%m/%Y")
+    except ValueError:
+        lbl_cart_status.config(text="⚠ Data inválida. Use DD/MM/AAAA.", fg="#FF5252"); return
+
+    # Se já existe, soma a posição (preço médio ponderado)
+    if ticker in _carteira:
+        old = _carteira[ticker]
+        qtd_total = float(old["qtd"]) + qtd
+        pm_novo   = (float(old["qtd"])*float(old["preco_medio"]) + qtd*pm) / qtd_total
+        _carteira[ticker] = {"qtd": qtd_total, "preco_medio": round(pm_novo,4),
+                              "data_compra": old["data_compra"]}
+        msg = f"✔ Posição de {nome_exibicao(ticker)} atualizada!"
+    else:
+        _carteira[ticker] = {"qtd": qtd, "preco_medio": pm, "data_compra": data_s}
+        msg = f"✔ {nome_exibicao(ticker)} adicionado à carteira!"
+
+    _salvar_carteira(_carteira)
+    lbl_cart_status.config(text=msg, fg="#00E676")
+    _atualizar_carteira_ui()
+
+def _remover_posicao(ticker):
+    if ticker in _carteira:
+        del _carteira[ticker]
+        _salvar_carteira(_carteira)
+        _atualizar_carteira_ui()
+
+def _atualizar_carteira_ui():
+    """Rebusca preços e re-renderiza toda a UI da carteira."""
+    lbl_cart_status.config(text="Buscando preços...", fg="#aaaaaa")
+    def _buscar():
+        precos = _buscar_precos_carteira(list(_carteira.keys()))
+        root.after(0, lambda: _renderizar_carteira(precos))
+    threading.Thread(target=_buscar, daemon=True).start()
+
+def _renderizar_carteira(precos):
+    """Renderiza tabela P&L + totais + gráfico."""
+    # Limpa tabela
+    for w in frame_cart_tabela.winfo_children(): w.destroy()
+
+    rows = _calcular_pl(_carteira, precos)
+
+    if not rows:
+        tk.Label(frame_cart_tabela,
+                 text="Nenhum ativo na carteira. Adicione acima.",
+                 bg="#0a0a14", fg="#555", font=("Arial", 9, "italic"), pady=16).pack()
+        _grafico_evolucao_carteira(_carteira, frame_cart_grafico)
+        lbl_cart_status.config(text="", fg="#aaaaaa")
+        return
+
+    # Cabeçalho da tabela
+    CAB_BG = "#0d1a24"
+    cols   = ["Ativo","Qtd","P.M. (R$)","Atual (R$)","Custo (R$)","Patrim. (R$)","Lucro R$","Lucro %","CDI%","Ação"]
+    widths = [7,5,9,9,10,10,10,8,8,5]
+
+    tbl = tk.Frame(frame_cart_tabela, bg=CAB_BG)
+    tbl.pack(fill="x", padx=6)
+
+    for c,(col,w) in enumerate(zip(cols,widths)):
+        tk.Label(tbl, text=col, bg=CAB_BG, fg=ACCENT,
+                 font=("Arial",8,"bold"), width=w,
+                 anchor="center").grid(row=0,column=c,padx=1,pady=3,sticky="ew")
+
+    tk.Frame(tbl, bg="#1a2a3a", height=1).grid(
+        row=1, column=0, columnspan=len(cols), sticky="ew")
+
+    total_custo = total_patrim = total_lucro = 0
+
+    for idx, r in enumerate(rows):
+        row_bg  = "#0a0a14" if idx%2==0 else "#0d0d1a"
+        cor_ret = "#00E676" if r["lucro_rs"] >= 0 else "#FF5252"
+        cdi_ret = _cdi_desde_compra(r["data_compra"])
+        cdi_txt = f"{cdi_ret:.2f}%" if cdi_ret else "—"
+        ri      = idx + 2
+
+        dados_row = [
+            (nome_exibicao(r["ticker"]), CORES_ATIVOS[list(_carteira.keys()).index(r["ticker"]) % len(CORES_ATIVOS)]),
+            (f"{r['qtd']:.0f}",          "#cccccc"),
+            (f"{r['pm']:.2f}",           "#cccccc"),
+            (f"{r['preco_atual']:.2f}",  "#cccccc"),
+            (f"{r['custo']:,.2f}",       "#cccccc"),
+            (f"{r['patrimonio']:,.2f}",  "#cccccc"),
+            (f"{r['lucro_rs']:+,.2f}",   cor_ret),
+            (f"{r['lucro_pct']:+.2f}%",  cor_ret),
+            (cdi_txt,                    "#aaaaaa"),
+        ]
+        for c,(val,fg) in enumerate(dados_row):
+            tk.Label(tbl, text=val, bg=row_bg, fg=fg,
+                     font=("Arial",8), width=widths[c],
+                     anchor="center").grid(row=ri,column=c,padx=1,pady=2,sticky="ew")
+
+        # Botão remover
+        tk.Button(tbl, text="✕", bg="#1a0a0a", fg="#FF5252",
+                  font=("Arial",8,"bold"), relief="flat", cursor="hand2", width=2,
+                  command=lambda t=r["ticker"]: _remover_posicao(t)
+                  ).grid(row=ri, column=9, padx=1, pady=2)
+
+        total_custo   += r["custo"]
+        total_patrim  += r["patrimonio"]
+        total_lucro   += r["lucro_rs"]
+
+    # Totais
+    total_pct = (total_lucro/total_custo*100) if total_custo>0 else 0
+    cor_tot   = "#00E676" if total_lucro>=0 else "#FF5252"
+    sep_r     = len(rows)+2
+    tk.Frame(tbl, bg="#1a2a3a", height=1).grid(
+        row=sep_r, column=0, columnspan=len(cols), sticky="ew", pady=2)
+    tot_row = sep_r+1
+    resumo = [
+        ("TOTAL","#FFD600"),(""," "),(""," "),(""," "),
+        (f"{total_custo:,.2f}","#FFD600"),
+        (f"{total_patrim:,.2f}","#FFD600"),
+        (f"{total_lucro:+,.2f}",cor_tot),
+        (f"{total_pct:+.2f}%", cor_tot),
+        (""," "),("",""),
+    ]
+    for c,(val,fg) in enumerate(resumo):
+        tk.Label(tbl, text=val, bg="#0d1a24", fg=fg,
+                 font=("Arial",8,"bold"), width=widths[c],
+                 anchor="center").grid(row=tot_row,column=c,padx=1,pady=3,sticky="ew")
+
+    lbl_cart_status.config(text=f"Carteira atualizada — {len(rows)} ativo(s)", fg="#00E676")
+
+    # Gráfico evolução
+    _grafico_evolucao_carteira(_carteira, frame_cart_grafico)
+
+# ======================================================
+# UI — CARD CARTEIRA PESSOAL (Etapa 5)
+# ======================================================
+CART_BG  = "#0a0a14"
+CART_ACC = "#00E5FF"
+
+frame_cart_outer = tk.Frame(frame_conteudo, bg=CART_ACC)
+frame_cart_outer.pack(fill="x", pady=(10, 0))
+
+frame_cart = tk.Frame(frame_cart_outer, bg=CART_BG)
+frame_cart.pack(fill="both", expand=True, padx=2, pady=2)
+
+# Cabeçalho
+cab_cart = tk.Frame(frame_cart, bg="#050510")
+cab_cart.pack(fill="x")
+tk.Label(cab_cart, text="💼  Carteira Pessoal", bg="#050510", fg=CART_ACC,
+         font=("Arial", 11, "bold"), pady=6).pack(side="left", padx=12)
+tk.Button(cab_cart, text="↻ Atualizar", bg=BTN, fg=CART_ACC,
+          font=("Arial", 8, "bold"), relief="flat", cursor="hand2",
+          command=_atualizar_carteira_ui).pack(side="right", padx=10)
+
+# Formulário de adição
+frame_cart_form = tk.Frame(frame_cart, bg=CART_BG)
+frame_cart_form.pack(fill="x", padx=10, pady=(8,4))
+
+def _mk(parent, texto):
+    tk.Label(parent, text=texto, bg=CART_BG, fg="#aaaaaa",
+             font=("Arial", 7)).pack(anchor="w")
+
+col_t = tk.Frame(frame_cart_form, bg=CART_BG); col_t.pack(side="left", padx=(0,6))
+_mk(col_t, "Ticker")
+entry_cart_ticker = tk.Entry(col_t, width=9, bg=BTN, fg="#888888",
+                              insertbackground=TXT, font=("Arial", 9), justify="center")
+entry_cart_ticker.insert(0, "ex: PETR4")
+entry_cart_ticker.bind("<FocusIn>",  lambda e: limpar_entry_placeholder(entry_cart_ticker, "ex: PETR4"))
+entry_cart_ticker.bind("<FocusOut>", lambda e: restaurar_placeholder(entry_cart_ticker, "ex: PETR4"))
+entry_cart_ticker.pack()
+
+col_q = tk.Frame(frame_cart_form, bg=CART_BG); col_q.pack(side="left", padx=(0,6))
+_mk(col_q, "Quantidade")
+entry_cart_qtd = tk.Entry(col_q, width=9, bg=BTN, fg=TXT,
+                           insertbackground=TXT, font=("Arial", 9), justify="center")
+entry_cart_qtd.insert(0, "100")
+entry_cart_qtd.pack()
+
+col_p = tk.Frame(frame_cart_form, bg=CART_BG); col_p.pack(side="left", padx=(0,6))
+_mk(col_p, "Preço médio (R$)")
+entry_cart_pm = tk.Entry(col_p, width=9, bg=BTN, fg=TXT,
+                          insertbackground=TXT, font=("Arial", 9), justify="center")
+entry_cart_pm.insert(0, "30.00")
+entry_cart_pm.pack()
+
+col_d = tk.Frame(frame_cart_form, bg=CART_BG); col_d.pack(side="left", padx=(0,6))
+_mk(col_d, "Data compra")
+entry_cart_data = tk.Entry(col_d, width=11, bg=BTN, fg=TXT,
+                            insertbackground=TXT, font=("Arial", 9), justify="center")
+entry_cart_data.insert(0, "01/01/2025")
+entry_cart_data.pack()
+
+col_b = tk.Frame(frame_cart_form, bg=CART_BG); col_b.pack(side="left", padx=(0,6))
+_mk(col_b, " ")
+tk.Button(col_b, text="＋ Adicionar", bg=CART_ACC, fg="#000000",
+          font=("Arial", 9, "bold"), relief="flat", cursor="hand2",
+          command=_adicionar_posicao).pack()
+
+lbl_cart_status = tk.Label(frame_cart, text="", bg=CART_BG, fg="#00E676",
+                             font=("Arial", 8), pady=2)
+lbl_cart_status.pack()
+
+# Tabela P&L
+frame_cart_tabela = tk.Frame(frame_cart, bg=CART_BG)
+frame_cart_tabela.pack(fill="x", padx=4, pady=(0,4))
+
+
+# -- Separador visual entre ações e CDBs --
+tk.Frame(frame_cart, bg="#1a1a2a", height=2).pack(fill="x", padx=10, pady=(8,0))
+
+# Cabeçalho CDB
+cab_cdb_cart = tk.Frame(frame_cart, bg="#050520")
+cab_cdb_cart.pack(fill="x")
+tk.Label(cab_cdb_cart, text="🏦  CDBs na Carteira", bg="#050520", fg="#FFD600",
+         font=("Arial", 10, "bold"), pady=5).pack(side="left", padx=12)
+
+# Formulário CDB
+frame_cdb_cart_form = tk.Frame(frame_cart, bg=CART_BG)
+frame_cdb_cart_form.pack(fill="x", padx=10, pady=(6, 4))
+
+def _mk_cdb(parent, texto):
+    tk.Label(parent, text=texto, bg=CART_BG, fg="#aaaaaa",
+             font=("Arial", 7)).pack(anchor="w")
+
+cdb_c1 = tk.Frame(frame_cdb_cart_form, bg=CART_BG); cdb_c1.pack(side="left", padx=(0,6))
+_mk_cdb(cdb_c1, "Nome / Banco")
+entry_cdb_nome = tk.Entry(cdb_c1, width=14, bg=BTN, fg="#888888",
+                           insertbackground=TXT, font=("Arial", 9), justify="center")
+entry_cdb_nome.insert(0, "ex: Nubank CDB")
+entry_cdb_nome.bind("<FocusIn>",  lambda e: limpar_entry_placeholder(entry_cdb_nome, "ex: Nubank CDB"))
+entry_cdb_nome.bind("<FocusOut>", lambda e: restaurar_placeholder(entry_cdb_nome, "ex: Nubank CDB"))
+entry_cdb_nome.pack()
+
+cdb_c2 = tk.Frame(frame_cdb_cart_form, bg=CART_BG); cdb_c2.pack(side="left", padx=(0,6))
+_mk_cdb(cdb_c2, "Valor aplicado (R$)")
+entry_cdb_valor = tk.Entry(cdb_c2, width=11, bg=BTN, fg=TXT,
+                            insertbackground=TXT, font=("Arial", 9), justify="center")
+entry_cdb_valor.insert(0, "5000")
+entry_cdb_valor.pack()
+
+cdb_c3 = tk.Frame(frame_cdb_cart_form, bg=CART_BG); cdb_c3.pack(side="left", padx=(0,6))
+_mk_cdb(cdb_c3, "% do CDI")
+entry_cdb_pct = tk.Entry(cdb_c3, width=8, bg=BTN, fg=TXT,
+                          insertbackground=TXT, font=("Arial", 9), justify="center")
+entry_cdb_pct.insert(0, "110")
+entry_cdb_pct.pack()
+
+cdb_c4 = tk.Frame(frame_cdb_cart_form, bg=CART_BG); cdb_c4.pack(side="left", padx=(0,6))
+_mk_cdb(cdb_c4, "Data aplicação")
+entry_cdb_data = tk.Entry(cdb_c4, width=11, bg=BTN, fg=TXT,
+                           insertbackground=TXT, font=("Arial", 9), justify="center")
+entry_cdb_data.insert(0, "01/01/2025")
+entry_cdb_data.pack()
+
+cdb_c5 = tk.Frame(frame_cdb_cart_form, bg=CART_BG); cdb_c5.pack(side="left", padx=(0,6))
+_mk_cdb(cdb_c5, " ")
+tk.Button(cdb_c5, text="＋ Adicionar CDB", bg="#FFD600", fg="#000000",
+          font=("Arial", 9, "bold"), relief="flat", cursor="hand2",
+          command=_adicionar_cdb).pack()
+
+lbl_cdb_status = tk.Label(frame_cart, text="", bg=CART_BG, fg="#00E676",
+                            font=("Arial", 8), pady=2)
+lbl_cdb_status.pack()
+
+# Tabela CDBs
+frame_cdb_cart_tabela = tk.Frame(frame_cart, bg=CART_BG)
+frame_cdb_cart_tabela.pack(fill="x", padx=4, pady=(0, 10))
+
+# Gráfico evolução
+frame_cart_grafico = tk.Frame(frame_cart, bg=CART_BG, height=200)
+frame_cart_grafico.pack(fill="x", padx=4, pady=(0,8))
+
 # ==============================
 # INICIALIZAR CHECKBOXES PADRÃO
 # ==============================
@@ -1186,5 +2104,17 @@ for ticker in ATIVOS_PADRAO:
     ativos_vars[ticker] = var
     ativos_ordem.append(ticker)
     _criar_checkbox(ticker, var)
+
+# Mostra mensagem inicial no card de insights
+_montar_insights([], frame_insights)
+
+# Inicializa carteira se houver dados salvos
+if _carteira:
+    _atualizar_carteira_ui()
+else:
+    _renderizar_carteira({})
+
+# Inicializa CDBs
+_renderizar_cdbs()
 
 root.mainloop()
