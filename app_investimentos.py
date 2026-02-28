@@ -1,8 +1,12 @@
-# ==============================
-# Dashboard de Investimentos v3
-# Verificação de ativo + máscara de data
-# Vinícius Tavares Rocha
-# ==============================
+# =============================================================================
+# Dashboard de Investimentos — v3.0
+# Autor: Vinícius Tavares Rocha
+# Descrição: Dashboard de análise de ações da B3 com IA consultora multi-LLM.
+#            Integra yFinance, Matplotlib, SQLite3 e APIs de Claude, GPT e Gemini.
+# Tecnologias: Python 3.10+, Tkinter, yFinance, Matplotlib, SQLite3, Anthropic,
+#              OpenAI, Google Generative AI
+# GitHub: github.com/seuusuario/dashboard-investimentos
+# =============================================================================
 
 import tkinter as tk
 from tkinter import ttk
@@ -12,16 +16,30 @@ import threading
 import matplotlib.pyplot as plt
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 from matplotlib.ticker import FuncFormatter
+import os
+import json as _json_mod
+import sqlite3
+
+# ── Etapa 6: carrega .env e APIs ──
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass  # sem dotenv, usa variáveis de ambiente do sistema
+
+ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
+OPENAI_API_KEY    = os.getenv("OPENAI_API_KEY", "")
+GOOGLE_API_KEY    = os.getenv("GOOGLE_API_KEY", "")
 
 # ==============================
 # CONFIGURAÇÃO DE CORES
 # ==============================
-BG      = "#0f1115"
-CARD    = "#08080a"
-TXT     = "#ffffff"
-BTN     = "#2a2f3a"
-ACCENT  = "#00E5FF"
-CDB_BG  = "#0d1f2d"
+BG      = "#111111"
+CARD    = "#1c1c1c"
+TXT     = "#e0e0e0"
+BTN     = "#2e2e2e"
+ACCENT  = "#cc0000"
+CDB_BG  = "#1c1c1c"
 
 CORES_ATIVOS = [
     "#00E5FF", "#FF9100", "#FF1744", "#76FF03", "#D500F9",
@@ -125,7 +143,7 @@ def adicionar_ativo():
     ticker = raw if raw.endswith(".SA") else raw + ".SA"
 
     if ticker in ativos_vars:
-        label_status.config(text=f"{nome_exibicao(ticker)} já está na lista.", fg="#FFD600")
+        label_status.config(text=f"{nome_exibicao(ticker)} já está na lista.", fg="#e60000")
         return
 
     btn_add.config(state="disabled", text="...")
@@ -154,7 +172,7 @@ def _pos_verificacao(ticker, valido):
     entry_novo_ativo.delete(0, tk.END)
     entry_novo_ativo.insert(0, "ex: EGIE3")
     entry_novo_ativo.config(fg="#888888")
-    label_status.config(text=f"✔ {nome_exibicao(ticker)} adicionado!", fg="#00E676")
+    label_status.config(text=f"✔ {nome_exibicao(ticker)} adicionado!", fg="#cc0000")
 
 def _criar_checkbox(ticker, var):
     idx = ativos_ordem.index(ticker)
@@ -169,7 +187,7 @@ def _criar_checkbox(ticker, var):
 
     tk.Checkbutton(
         row_frame, text=nome_exibicao(ticker), variable=var,
-        bg=CARD, fg=TXT, selectcolor="#1a2a3a",
+        bg=CARD, fg=TXT, selectcolor="#2e2e2e",
         activebackground=CARD, activeforeground=TXT,
         font=("Arial", 9), cursor="hand2"
     ).pack(side="left")
@@ -202,7 +220,7 @@ def _montar_grafico(dados, selecionados, modo):
     ax.set_facecolor(BG)
 
     ax_leg = fig.add_axes([0.77, 0.05, 0.22, 0.90])
-    ax_leg.set_facecolor("#0d1a24")
+    ax_leg.set_facecolor("#1c1c1c")
     ax_leg.set_xticks([]); ax_leg.set_yticks([])
     for spine in ax_leg.spines.values():
         spine.set_edgecolor(ACCENT); spine.set_linewidth(1.2)
@@ -345,21 +363,21 @@ def _montar_tabela(dados, selecionados, frame_pai):
     """Cria tabela de análise dentro de frame_pai — usa grid no frame mestre."""
     for w in frame_pai.winfo_children(): w.destroy()
 
-    colunas  = ["Ativo", "Início", "Fim", "Retorno %", "Volatil. %", "Risco", "Máximo", "Mínimo"]
-    larguras = [80, 85, 85, 85, 85, 70, 85, 85]
+    colunas  = ["Ativo", "Início", "Fim", "Retorno %", "Var. Dia", "Volatil. %", "Risco", "Máximo", "Mínimo"]
+    larguras = [80, 85, 85, 85, 75, 85, 70, 85, 85]
 
     # Frame mestre com grid
-    tbl = tk.Frame(frame_pai, bg="#0d1a24")
+    tbl = tk.Frame(frame_pai, bg="#1c1c1c")
     tbl.pack(fill="x", padx=8)
 
     # Cabeçalho
     for c, (col, w) in enumerate(zip(colunas, larguras)):
-        tk.Label(tbl, text=col, bg="#0d1a24", fg=ACCENT,
+        tk.Label(tbl, text=col, bg="#1c1c1c", fg=ACCENT,
                  font=("Arial", 8, "bold"), width=w//8,
                  anchor="center").grid(row=0, column=c, padx=1, pady=3, sticky="ew")
 
     # Separador
-    sep = tk.Frame(tbl, bg="#1a2a3a", height=1)
+    sep = tk.Frame(tbl, bg="#2e2e2e", height=1)
     sep.grid(row=1, column=0, columnspan=len(colunas), sticky="ew", pady=0)
 
     # Linhas de dados
@@ -375,19 +393,27 @@ def _montar_tabela(dados, selecionados, frame_pai):
             maximo    = float(serie.max())
             minimo    = float(serie.min())
             cor_ativo = CORES_ATIVOS[ativos_ordem.index(ativo) % len(CORES_ATIVOS)]
-            cor_ret   = "#00E676" if retorno >= 0 else "#FF5252"
-            row_bg    = "#0a0a0f" if idx_a % 2 == 0 else "#0f0f18"
+            cor_ret   = "#00C896" if retorno >= 0 else "#FF5252"
+            row_bg    = "#161616" if idx_a % 2 == 0 else "#202020"
 
             risco_txt, cor_risco = _classificar_risco(vol)
+            # Variação do último dia disponível
+            if len(serie) >= 2:
+                var_dia     = (serie.iloc[-1] / serie.iloc[-2] - 1) * 100
+                var_dia_txt = f"{var_dia:+.2f}%"
+                cor_var_dia = "#00C896" if var_dia >= 0 else "#FF5252"
+            else:
+                var_dia_txt = "—"; cor_var_dia = "#888888"
             valores = [
                 (nome_exibicao(ativo), cor_ativo),
-                (f"R$ {inicio:.2f}",   "#cccccc"),
-                (f"R$ {fim:.2f}",      "#cccccc"),
+                (f"R$ {inicio:.2f}",   "#e0e0e0"),
+                (f"R$ {fim:.2f}",      "#e0e0e0"),
                 (f"{retorno:+.2f}%",   cor_ret),
-                (f"{vol:.2f}%",        "#cccccc"),
+                (var_dia_txt,          cor_var_dia),
+                (f"{vol:.2f}%",        "#e0e0e0"),
                 (risco_txt,            cor_risco),
-                (f"R$ {maximo:.2f}",   "#cccccc"),
-                (f"R$ {minimo:.2f}",   "#cccccc"),
+                (f"R$ {maximo:.2f}",   "#e0e0e0"),
+                (f"R$ {minimo:.2f}",   "#e0e0e0"),
             ]
             r = idx_a + 2   # +2 por causa do header e separador
             for c, (val, fg) in enumerate(valores):
@@ -443,11 +469,11 @@ def _calcular_analise(dados, selecionados):
 
 def _classificar_risco(vol):
     if vol < 1.5:
-        return ("Baixo",  "#00E676")
+        return ("Baixo",  "#00C896")   # verde
     elif vol < 2.5:
-        return ("Médio",  "#FFD600")
+        return ("Médio",  "#FFD600")   # amarelo
     else:
-        return ("Alto",   "#FF5252")
+        return ("Alto",   "#FF5252")   # vermelho
 
 
 # ==============================
@@ -489,11 +515,11 @@ def _tendencia_ativo(serie):
     preco_atual = serie.iloc[-1]
     diff = (preco_atual - mm20_atual) / mm20_atual * 100
     if diff > 1.5:
-        return ("↑ Alta",   "#00E676")
+        return ("↑ Alta",   "#cc0000")
     elif diff < -1.5:
         return ("↓ Queda",  "#FF5252")
     else:
-        return ("→ Lateral","#FFD600")
+        return ("→ Lateral","#e60000")
 
 # ==============================
 # 6. SCORE GERAL DA CARTEIRA (0–10)
@@ -517,9 +543,9 @@ def _calcular_score(analises):
     return round(score_ret * 0.6 + score_vol * 0.4, 1)
 
 def _cor_score(score):
-    if score >= 7:   return "#00E676"
-    elif score >= 4: return "#FFD600"
-    else:            return "#FF5252"
+    if score >= 7:   return "#00C896"   # verde
+    elif score >= 4: return "#FFD600"   # amarelo
+    else:            return "#FF5252"   # vermelho
 
 # ==============================
 # 7. COMPARAÇÃO COM CDI
@@ -660,15 +686,15 @@ def exportar_pdf():
 
         tbl = Table(rows, colWidths=[3*cm,2.5*cm,2.5*cm,2*cm,3*cm,3*cm])
         tbl.setStyle(TableStyle([
-            ("BACKGROUND", (0,0), (-1,0), colors.HexColor("#0d1a24")),
-            ("TEXTCOLOR",  (0,0), (-1,0), colors.HexColor("#00E5FF")),
+            ("BACKGROUND", (0,0), (-1,0), colors.HexColor("#1c1c1c")),
+            ("TEXTCOLOR",  (0,0), (-1,0), colors.HexColor("#cc0000")),
             ("FONTNAME",   (0,0), (-1,0), "Helvetica-Bold"),
             ("FONTSIZE",   (0,0), (-1,-1), 8),
             ("ALIGN",      (0,0), (-1,-1), "CENTER"),
             ("ROWBACKGROUNDS", (0,1), (-1,-1),
-             [colors.HexColor("#0a0a0f"), colors.HexColor("#0f0f18")]),
+             [colors.HexColor("#161616"), colors.HexColor("#202020")]),
             ("TEXTCOLOR",  (0,1), (-1,-1), colors.white),
-            ("GRID",       (0,0), (-1,-1), 0.3, colors.HexColor("#1a2a3a")),
+            ("GRID",       (0,0), (-1,-1), 0.3, colors.HexColor("#2e2e2e")),
             ("TOPPADDING", (0,0), (-1,-1), 4),
             ("BOTTOMPADDING",(0,0),(-1,-1),4),
         ]))
@@ -688,14 +714,14 @@ def exportar_pdf():
             story.append(Paragraph(f"• {f['titulo']}: {f['texto']}", body_style))
 
         doc.build(story)
-        btn_pdf.config(text="✔ PDF Salvo!", fg="#00E676")
+        btn_pdf.config(text="✔ PDF Salvo!", fg="#cc0000")
         root.after(3000, lambda: btn_pdf.config(text="📄 Exportar PDF", fg=TXT))
 
     except ImportError:
         # reportlab não instalado
         import subprocess, sys
         subprocess.run([sys.executable, "-m", "pip", "install", "reportlab", "--quiet"])
-        btn_pdf.config(text="Instalando... tente novamente", fg="#FFD600")
+        btn_pdf.config(text="Instalando... tente novamente", fg="#e60000")
         root.after(4000, lambda: btn_pdf.config(text="📄 Exportar PDF", fg=TXT))
     except Exception as e:
         btn_pdf.config(text=f"⚠ Erro", fg="#FF5252")
@@ -720,7 +746,7 @@ def _gerar_insights_completo(analises, dados, selecionados, start_str, end_str):
     sinal = "+" if melhor["retorno"] >= 0 else ""
     frases.append({"icone":"🏆","titulo":"Top performer",
         "texto": f"{melhor['nome']} apresentou o maior retorno no período ({sinal}{melhor['retorno']:.2f}%).",
-        "cor":"#00E676"})
+        "cor":"#FFD600"})
 
     # 📉 Pior desempenho
     sinal2 = "+" if pior["retorno"] >= 0 else ""
@@ -732,7 +758,7 @@ def _gerar_insights_completo(analises, dados, selecionados, start_str, end_str):
     risco_txt, _ = _classificar_risco(mais_vol["vol"])
     frases.append({"icone":"⚠","titulo":"Maior risco",
         "texto": f"{mais_vol['nome']} possui alta volatilidade ({mais_vol['vol']:.2f}%) — risco {risco_txt}.",
-        "cor":"#FFD600"})
+        "cor":"#FF9100"})
 
     # 🛡 Mais estável
     frases.append({"icone":"🛡","titulo":"Mais estável",
@@ -779,7 +805,7 @@ def _gerar_insights_completo(analises, dados, selecionados, start_str, end_str):
             ret_medio = sum(a["retorno"] for a in analises) / len(analises)
             diff = ret_medio - cdi_pct
             sinal_cdi = "acima" if diff >= 0 else "abaixo"
-            cor_cdi   = "#00E676" if diff >= 0 else "#FF5252"
+            cor_cdi   = "#00C896" if diff >= 0 else "#FF5252"
             frases.append({"icone":"🏦","titulo":"vs CDI",
                 "texto": f"Retorno médio da carteira ({ret_medio:+.2f}%) ficou {abs(diff):.2f}% {sinal_cdi} do CDI ({cdi_pct:.2f}%) no período.",
                 "cor": cor_cdi})
@@ -789,14 +815,14 @@ def _gerar_insights_completo(analises, dados, selecionados, start_str, end_str):
     if alertas:
         frases.append({"icone":"⚡","titulo":"Concentração setorial",
             "texto": "Atenção: " + "; ".join(alertas) + ". Considere diversificar.",
-            "cor":"#FF9100"})
+            "cor":"#FF9915"})
 
     # 9. Melhor mês
     mes, ret_mes = _melhor_mes(dados, selecionados)
     if mes:
         frases.append({"icone":"📅","titulo":"Melhor mês",
             "texto": f"O melhor mês da carteira foi {mes} com retorno médio de {ret_mes:+.2f}%.",
-            "cor":"#EA80FC"})
+            "cor":"#FFD600"})
 
     return frases
 
@@ -813,19 +839,19 @@ def _desenhar_score_bar(parent, score, cor):
     BAR_H = 10
 
     c = tk.Canvas(parent, width=BAR_W, height=BAR_H,
-                  bg="#0d0d1a", highlightthickness=0)
+                  bg="#202020", highlightthickness=0)
     c.pack(side="left", padx=(8, 0), pady=1)
 
     # Fundo
     c.create_rectangle(0, 0, BAR_W, BAR_H,
-                        fill="#1a1a2a", outline="")
+                        fill="#2e2e2e", outline="")
     # Preenchimento proporcional
     fill_w = int((score / 10) * BAR_W)
     if fill_w > 0:
         c.create_rectangle(0, 0, fill_w, BAR_H,
                             fill=cor, outline="")
     # Texto da nota à direita
-    tk.Label(parent, text=f"{score}/10", bg="#0d0d1a", fg=cor,
+    tk.Label(parent, text=f"{score}/10", bg="#202020", fg=cor,
              font=("Arial", 8, "bold")).pack(side="left", padx=(4, 0))
 
 
@@ -836,25 +862,25 @@ def _montar_insights(analises, frame_pai):
 
     if not frases:
         tk.Label(frame_pai, text="📈  Gere um gráfico para ver os insights da carteira.",
-                 bg="#0d0d1a", fg="#555555", font=("Arial", 9, "italic"),
+                 bg="#202020", fg="#cc0000", font=("Arial", 9, "italic"),
                  pady=14).pack()
         return
 
     for f in frases:
-        row = tk.Frame(frame_pai, bg="#0d0d1a")
+        row = tk.Frame(frame_pai, bg="#202020")
         row.pack(fill="x", padx=8, pady=2)
 
-        tk.Label(row, text=f["icone"], bg="#0d0d1a", fg=f["cor"],
+        tk.Label(row, text=f["icone"], bg="#202020", fg=f["cor"],
                  font=("Arial", 11), width=2).pack(side="left", padx=(0,6))
 
-        col = tk.Frame(row, bg="#0d0d1a")
+        col = tk.Frame(row, bg="#202020")
         col.pack(side="left", fill="x", expand=True)
 
         # Linha do título + score bar (se for score)
-        titulo_row = tk.Frame(col, bg="#0d0d1a")
+        titulo_row = tk.Frame(col, bg="#202020")
         titulo_row.pack(fill="x")
 
-        tk.Label(titulo_row, text=f["titulo"], bg="#0d0d1a", fg=f["cor"],
+        tk.Label(titulo_row, text=f["titulo"], bg="#202020", fg=f["cor"],
                  font=("Arial", 8, "bold"), anchor="w").pack(side="left")
 
         # Barra de progresso só para o score
@@ -865,7 +891,7 @@ def _montar_insights(analises, frame_pai):
             except Exception:
                 pass
 
-        tk.Label(col, text=f["texto"], bg="#0d0d1a", fg="#cccccc",
+        tk.Label(col, text=f["texto"], bg="#202020", fg="#e0e0e0",
                  font=("Arial", 8), anchor="w", wraplength=780).pack(fill="x")
 
 
@@ -924,7 +950,7 @@ def exportar_png():
     if caminho:
         fig.savefig(caminho, dpi=150, bbox_inches="tight",
                     facecolor=BG, edgecolor="none")
-        btn_exportar.config(text="✔ Salvo!", fg="#00E676")
+        btn_exportar.config(text="✔ Salvo!", fg="#cc0000")
         root.after(2500, lambda: btn_exportar.config(text="📥 Exportar PNG", fg=TXT))
 
 
@@ -970,7 +996,7 @@ def gerar_grafico():
     if not selecionados:
         for w in frame_grafico.winfo_children(): w.destroy()
         tk.Label(frame_grafico, text="Selecione ao menos um ativo.",
-                 fg="#FFD600", bg=CARD).pack(pady=20); return
+                 fg="#e60000", bg=CARD).pack(pady=20); return
 
     # Mostra loading e desabilita botão
     estado_load = _mostrar_loading()
@@ -1008,15 +1034,15 @@ def _pos_download(dados, selecionados, estado_load, start, end):
 # ==============================
 MOEDAS = [
     ("BTC",  "BTC-USD",  "₿",  "#F7931A"),
-    ("USD",  "USDBRL=X", "$",  "#00E676"),
+    ("USD",  "USDBRL=X", "$",  "#cc0000"),
     ("EUR",  "EURBRL=X", "€",  "#448AFF"),
     ("GBP",  "GBPBRL=X", "£",  "#E040FB"),
     ("JPY",  "JPYBRL=X", "¥",  "#FF4081"),
     ("CHF",  "CHFBRL=X", "₣",  "#FFFFFF"),
     ("CNY",  "CNYBRL=X", "¥",  "#FF1744"),
-    ("AUD",  "AUDBRL=X", "A$", "#FFD600"),
-    ("CAD",  "CADBRL=X", "C$", "#FF9100"),
-    ("BRL",  None,        "R$", "#00E5FF"),  # referência fixa
+    ("AUD",  "AUDBRL=X", "A$", "#e60000"),
+    ("CAD",  "CADBRL=X", "C$", "#FF9915"),
+    ("BRL",  None,        "R$", "#cc0000"),  # referência fixa
 ]
 
 # Guarda os Labels para atualizar
@@ -1060,7 +1086,7 @@ def _atualizar_label_moeda(sigla, preco, simbolo, cor, variacao):
     lbl_val.config(text=texto, fg=cor)
 
     sinal = "▲" if variacao >= 0 else "▼"
-    cor_var = "#00E676" if variacao >= 0 else "#FF5252"
+    cor_var = "#00C896" if variacao >= 0 else "#FF5252"
     lbl_var.config(text=f"{sinal} {abs(variacao):.2f}%", fg=cor_var)
 
 def atualizar_cotacoes():
@@ -1085,7 +1111,7 @@ def simular_cdb():
         lucro = final - valor
         resultado_cdb.config(
             text=f"💰  Valor final: R$ {final:,.2f}   |   Lucro: R$ {lucro:,.2f}",
-            fg="#00E676")
+            fg="#00C896")
     except Exception:
         resultado_cdb.config(text="⚠  Preencha os campos com números válidos", fg="#FF5252")
 
@@ -1132,7 +1158,7 @@ def calcular_meta():
 
             resultado_meta.config(
                 text=f"⏱  Tempo necessário: {tempo_str}",
-                fg="#00E676")
+                fg="#00C896")
 
         else:
             # Usuário informou o prazo em meses → calcula aporte mensal
@@ -1149,7 +1175,7 @@ def calcular_meta():
 
             resultado_meta.config(
                 text=f"💸  Aporte mensal necessário: R$ {aporte:,.2f}",
-                fg="#00E676")
+                fg="#00C896")
 
     except Exception:
         resultado_meta.config(text="⚠  Preencha os campos corretamente", fg="#FF5252")
@@ -1170,6 +1196,11 @@ def _atualizar_label_modo(*args):
 root = tk.Tk()
 root.title("Dashboard de Investimentos")
 root.geometry("1280x800")
+try:
+    root.iconbitmap(default="")  # sem ícone externo
+    root.wm_iconname("📊")
+except Exception:
+    pass
 root.configure(bg=BG)
 
 frame_main = tk.Frame(root, bg=BG)
@@ -1209,7 +1240,7 @@ frame_lista_ativos.bind("<Configure>",
 canvas_scroll.bind_all("<MouseWheel>",
     lambda e: canvas_scroll.yview_scroll(int(-1*(e.delta/120)), "units"))
 
-tk.Frame(frame_sidebar, bg="#1a2a3a", height=1).pack(fill="x", padx=6, pady=6)
+tk.Frame(frame_sidebar, bg="#2e2e2e", height=1).pack(fill="x", padx=6, pady=6)
 tk.Label(frame_sidebar, text="Adicionar ativo:", bg=CARD, fg="#aaaaaa",
          font=("Arial", 8)).pack(padx=6, anchor="w")
 
@@ -1229,12 +1260,12 @@ btn_add = tk.Button(frame_add, text="+", bg=ACCENT, fg="#000000",
                     width=2, command=adicionar_ativo)
 btn_add.pack(side="left", padx=(4, 0))
 
-label_status = tk.Label(frame_sidebar, text="", bg=CARD, fg="#00E676",
+label_status = tk.Label(frame_sidebar, text="", bg=CARD, fg="#cc0000",
                          font=("Arial", 8), wraplength=160)
 label_status.pack(padx=6, pady=4)
 
 # ── PAINEL DE COTAÇÕES ──
-tk.Frame(frame_sidebar, bg="#1a2a3a", height=1).pack(fill="x", padx=6, pady=(4, 0))
+tk.Frame(frame_sidebar, bg="#2e2e2e", height=1).pack(fill="x", padx=6, pady=(4, 0))
 
 frame_cab_cotacao = tk.Frame(frame_sidebar, bg=CARD)
 frame_cab_cotacao.pack(fill="x", padx=6, pady=(4, 2))
@@ -1367,29 +1398,29 @@ frame_grafico = tk.Frame(frame_conteudo, bg=CARD)
 frame_grafico.pack(fill="both", expand=True)
 
 # -- TABELA DE ANÁLISE --
-frame_tabela_outer = tk.Frame(frame_conteudo, bg="#0d1a24")
+frame_tabela_outer = tk.Frame(frame_conteudo, bg="#1c1c1c")
 frame_tabela_outer.pack(fill="x", pady=(4, 0))
 
 tk.Label(frame_tabela_outer, text="📊  Análise do Período",
-         bg="#0d1a24", fg=ACCENT, font=("Arial", 9, "bold"),
+         bg="#1c1c1c", fg=ACCENT, font=("Arial", 9, "bold"),
          pady=4).pack(anchor="w", padx=8)
 
-frame_tabela = tk.Frame(frame_tabela_outer, bg="#0d1a24")
+frame_tabela = tk.Frame(frame_tabela_outer, bg="#1c1c1c")
 frame_tabela.pack(fill="x", padx=4, pady=(0, 4))
 
 # -- CARD DE INSIGHTS --
-frame_insights_outer = tk.Frame(frame_conteudo, bg="#D500F9")
+frame_insights_outer = tk.Frame(frame_conteudo, bg="#cc0000")
 frame_insights_outer.pack(fill="x", pady=(6, 0))
 
-frame_insights_inner = tk.Frame(frame_insights_outer, bg="#0d0d1a")
+frame_insights_inner = tk.Frame(frame_insights_outer, bg="#202020")
 frame_insights_inner.pack(fill="both", expand=True, padx=2, pady=2)
 
-cab_ins = tk.Frame(frame_insights_inner, bg="#150015")
+cab_ins = tk.Frame(frame_insights_inner, bg="#0d0d0d")
 cab_ins.pack(fill="x")
-tk.Label(cab_ins, text="🧠  Inteligência do Período", bg="#150015", fg="#D500F9",
+tk.Label(cab_ins, text="🧠  Inteligência do Período", bg="#0d0d0d", fg="#cc0000",
          font=("Arial", 10, "bold"), pady=6).pack(side="left", padx=12)
 
-frame_insights = tk.Frame(frame_insights_inner, bg="#0d0d1a")
+frame_insights = tk.Frame(frame_insights_inner, bg="#202020")
 frame_insights.pack(fill="x", pady=(4, 8))
 
 # -- ÁREA DOS DOIS CARDS (CDB + META) --
@@ -1446,12 +1477,12 @@ tk.Button(col4, text=" Simular ", bg=ACCENT, fg="#000000",
           font=("Arial", 9, "bold"), relief="flat", cursor="hand2",
           command=simular_cdb).pack()
 
-resultado_cdb = tk.Label(frame_cdb, text="", bg=CDB_BG, fg="#00E676",
+resultado_cdb = tk.Label(frame_cdb, text="", bg=CDB_BG, fg="#cc0000",
                           font=("Arial", 10, "bold"), pady=5)
 resultado_cdb.pack()
 
 # ── CARD DIREITO: Calculadora de Meta ──
-frame_meta_outer = tk.Frame(frame_cards, bg="#FFD600")
+frame_meta_outer = tk.Frame(frame_cards, bg="#e60000")
 frame_meta_outer.pack(side="left", fill="both", expand=True, padx=(5, 0))
 
 META_BG = "#1a1a0a"
@@ -1460,7 +1491,7 @@ frame_meta.pack(fill="both", expand=True, padx=2, pady=2)
 
 cab_meta = tk.Frame(frame_meta, bg="#2a2a00")
 cab_meta.pack(fill="x")
-tk.Label(cab_meta, text="🎯  Calculadora de Meta", bg="#2a2a00", fg="#FFD600",
+tk.Label(cab_meta, text="🎯  Calculadora de Meta", bg="#2a2a00", fg="#e60000",
          font=("Arial", 10, "bold"), pady=6).pack(side="left", padx=10)
 
 # Modo: calcular prazo OU calcular aporte
@@ -1514,11 +1545,11 @@ entry_aporte_ou_prazo.pack()
 # Botão
 m4 = tk.Frame(linha_meta, bg=META_BG); m4.pack(side="left", padx=8)
 make_label_meta(m4, " ")
-tk.Button(m4, text=" Calcular ", bg="#FFD600", fg="#000000",
+tk.Button(m4, text=" Calcular ", bg="#e60000", fg="#161616",
           font=("Arial", 9, "bold"), relief="flat", cursor="hand2",
           command=calcular_meta).pack()
 
-resultado_meta = tk.Label(frame_meta, text="", bg=META_BG, fg="#00E676",
+resultado_meta = tk.Label(frame_meta, text="", bg=META_BG, fg="#cc0000",
                            font=("Arial", 10, "bold"), pady=5)
 resultado_meta.pack()
 
@@ -1529,6 +1560,91 @@ resultado_meta.pack()
 import json, os, math
 
 CARTEIRA_JSON = os.path.join(os.path.dirname(os.path.abspath(__file__)), "carteira.json")
+
+# ── 1b. Histórico de patrimônio (SQLite3) ──
+DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "historico.db")
+
+def _init_db():
+    """Cria o banco SQLite e a tabela de histórico se não existirem."""
+    conn = sqlite3.connect(DB_PATH)
+    cur  = conn.cursor()
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS historico_patrimonio (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            data        TEXT    NOT NULL,
+            custo_total REAL    NOT NULL,
+            patrimonio  REAL    NOT NULL,
+            lucro_rs    REAL    NOT NULL,
+            lucro_pct   REAL    NOT NULL,
+            n_ativos    INTEGER NOT NULL
+        )
+    """)
+    conn.commit()
+    conn.close()
+
+def _registrar_patrimonio(custo_total, patrimonio, lucro_rs, lucro_pct, n_ativos):
+    """
+    Salva um snapshot do patrimônio atual no banco.
+    Chamado automaticamente após cada atualização da carteira.
+    Evita duplicatas — só registra uma vez por dia.
+    """
+    try:
+        conn = conn = sqlite3.connect(DB_PATH)
+        cur  = conn.cursor()
+        hoje = datetime.now().strftime("%Y-%m-%d")
+        # Verifica se já registrou hoje
+        cur.execute("SELECT id FROM historico_patrimonio WHERE data = ?", (hoje,))
+        if cur.fetchone():
+            # Atualiza o registro de hoje em vez de duplicar
+            cur.execute("""
+                UPDATE historico_patrimonio
+                SET custo_total=?, patrimonio=?, lucro_rs=?, lucro_pct=?, n_ativos=?
+                WHERE data=?
+            """, (custo_total, patrimonio, lucro_rs, lucro_pct, n_ativos, hoje))
+        else:
+            cur.execute("""
+                INSERT INTO historico_patrimonio
+                    (data, custo_total, patrimonio, lucro_rs, lucro_pct, n_ativos)
+                VALUES (?, ?, ?, ?, ?, ?)
+            """, (hoje, custo_total, patrimonio, lucro_rs, lucro_pct, n_ativos))
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        print(f"[SQLite] Erro ao registrar patrimônio: {e}")
+
+def _buscar_historico(dias=90):
+    """
+    Retorna os últimos N dias do histórico como lista de dicts.
+    Usado para plotar a evolução do patrimônio ao longo do tempo.
+    """
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        cur  = conn.cursor()
+        cur.execute("""
+            SELECT data, custo_total, patrimonio, lucro_rs, lucro_pct, n_ativos
+            FROM historico_patrimonio
+            ORDER BY data DESC
+            LIMIT ?
+        """, (dias,))
+        rows = cur.fetchall()
+        conn.close()
+        return [
+            {
+                "data":        r[0],
+                "custo_total": r[1],
+                "patrimonio":  r[2],
+                "lucro_rs":    r[3],
+                "lucro_pct":   r[4],
+                "n_ativos":    r[5],
+            }
+            for r in reversed(rows)  # ordem cronológica
+        ]
+    except Exception as e:
+        print(f"[SQLite] Erro ao buscar histórico: {e}")
+        return []
+
+# Inicializa o banco na inicialização do app
+_init_db()
 
 # ── 1. Persistência JSON ──
 def _carregar_carteira():
@@ -1541,6 +1657,9 @@ def _carregar_carteira():
                 return {}
             validos = {}
             for ticker, pos in dados.items():
+                ticker = ticker.strip()
+                if not ticker:
+                    continue
                 if all(k in pos for k in ("qtd","preco_medio","data_compra")):
                     pos["qtd"]         = float(pos["qtd"])
                     pos["preco_medio"] = float(pos["preco_medio"])
@@ -1558,6 +1677,11 @@ def _carregar_carteira():
 def _salvar_carteira(carteira):
     with open(CARTEIRA_JSON, "w", encoding="utf-8") as f:
         json.dump(carteira, f, ensure_ascii=False, indent=2)
+    try:
+        n = len(carteira)
+        root.title(f"Dashboard de Investimentos — {n} ativo{'s' if n!=1 else ''} na carteira")
+    except Exception:
+        pass
 
 _carteira = _carregar_carteira()
 
@@ -1632,9 +1756,11 @@ def _adicionar_cdb():
     except ValueError:
         lbl_cdb_status.config(text="⚠ Data inválida. Use DD/MM/AAAA.", fg="#FF5252"); return
 
-    _cdbs.append({"nome": nome_s, "valor": valor, "pct_cdi": pct, "data": data_s})
+    venc_s = entry_cdb_venc.get().strip()
+    venc_val = venc_s if (venc_s and venc_s != "DD/MM/AAAA") else "—"
+    _cdbs.append({"nome": nome_s, "valor": valor, "pct_cdi": pct, "data": data_s, "vencimento": venc_val})
     _salvar_cdbs(_cdbs)
-    lbl_cdb_status.config(text=f"✔ CDB '{nome_s}' adicionado!", fg="#00E676")
+    lbl_cdb_status.config(text=f"✔ CDB '{nome_s}' adicionado!", fg="#cc0000")
     _renderizar_cdbs()
 
 def _remover_cdb(idx):
@@ -1650,22 +1776,22 @@ def _renderizar_cdbs():
     if not _cdbs:
         tk.Label(frame_cdb_cart_tabela,
                  text="Nenhum CDB registrado. Adicione acima.",
-                 bg="#0a0a14", fg="#555", font=("Arial", 9, "italic"), pady=10).pack()
+                 bg="#161616", fg="#cc0000", font=("Arial", 9, "italic"), pady=10).pack()
         return
 
-    CAB_BG = "#0d1f2d"
-    cols   = ["Nome/Banco", "Aplicado (R$)", "% CDI", "Data", "Dias", "Rendimento R$", "Total R$", "Rent. %", "Ação"]
-    widths = [13, 11, 6, 10, 5, 13, 11, 8, 5]
+    CAB_BG = "#1c1c1c"
+    cols   = ["Nome/Banco", "Aplicado (R$)", "% CDI", "Data", "Vencimento", "Dias", "Rendimento R$", "Total R$", "Rent. %", "Alerta", "Ação"]
+    widths = [12, 10, 5, 10, 10, 5, 12, 10, 7, 7, 5]
 
     tbl = tk.Frame(frame_cdb_cart_tabela, bg=CAB_BG)
     tbl.pack(fill="x", padx=6)
 
     for c, (col, w) in enumerate(zip(cols, widths)):
-        tk.Label(tbl, text=col, bg=CAB_BG, fg="#FFD600",
+        tk.Label(tbl, text=col, bg=CAB_BG, fg="#e60000",
                  font=("Arial", 8, "bold"), width=w,
                  anchor="center").grid(row=0, column=c, padx=1, pady=3, sticky="ew")
 
-    tk.Frame(tbl, bg="#1a2a1a", height=1).grid(
+    tk.Frame(tbl, bg="#2e2e2e", height=1).grid(
         row=1, column=0, columnspan=len(cols), sticky="ew")
 
     total_aplicado = total_rendimento = total_atual = 0
@@ -1674,29 +1800,48 @@ def _renderizar_cdbs():
         rend, total, dias = _calcular_rendimento_cdb(
             cdb["valor"], cdb["pct_cdi"], cdb["data"])
         rent_pct = (rend / cdb["valor"] * 100) if cdb["valor"] > 0 else 0
-        row_bg   = "#0a0a14" if idx % 2 == 0 else "#0d0d1a"
-        cor_rend = "#00E676"
+        row_bg   = "#161616" if idx % 2 == 0 else "#202020"
+        cor_rend = "#00C896"
         ri       = idx + 2
 
+        # Alerta de vencimento
+        venc = cdb.get("vencimento", "—")
+        alerta_venc = ""
+        cor_alerta  = "#888888"
+        if venc and venc != "—":
+            try:
+                dv = datetime.strptime(venc, "%d/%m/%Y")
+                dias_venc = (dv - datetime.now()).days
+                if dias_venc < 0:
+                    alerta_venc = "VENCIDO"; cor_alerta = "#FF5252"
+                elif dias_venc <= 30:
+                    alerta_venc = f"{dias_venc}d ⚠"; cor_alerta = "#FF9915"
+                elif dias_venc <= 90:
+                    alerta_venc = f"{dias_venc}d"; cor_alerta = "#e60000"
+                else:
+                    alerta_venc = f"{dias_venc}d"; cor_alerta = "#cc0000"
+            except: pass
         dados_row = [
-            (cdb["nome"],                "#FFD600"),
-            (f"{cdb['valor']:,.2f}",     "#cccccc"),
-            (f"{cdb['pct_cdi']:.0f}%",  "#cccccc"),
-            (cdb["data"],                "#cccccc"),
+            (cdb["nome"],                "#e60000"),
+            (f"{cdb['valor']:,.2f}",     "#e0e0e0"),
+            (f"{cdb['pct_cdi']:.0f}%",  "#e0e0e0"),
+            (cdb["data"],                "#e0e0e0"),
+            (venc,                       "#888888"),
             (str(dias),                  "#888888"),
             (f"{rend:+,.2f}",            cor_rend),
             (f"{total:,.2f}",            cor_rend),
             (f"{rent_pct:.2f}%",         cor_rend),
+            (alerta_venc,                cor_alerta),
         ]
         for c, (val, fg) in enumerate(dados_row):
             tk.Label(tbl, text=val, bg=row_bg, fg=fg,
                      font=("Arial", 8), width=widths[c],
                      anchor="center").grid(row=ri, column=c, padx=1, pady=2, sticky="ew")
 
-        tk.Button(tbl, text="✕", bg="#1a0a0a", fg="#FF5252",
+        tk.Button(tbl, text="✕", bg="#2a0000", fg="#FF5252",
                   font=("Arial", 8, "bold"), relief="flat", cursor="hand2", width=2,
                   command=lambda i=idx: _remover_cdb(i)
-                  ).grid(row=ri, column=8, padx=1, pady=2)
+                  ).grid(row=ri, column=10, padx=1, pady=2)
 
         total_aplicado  += cdb["valor"]
         total_rendimento += rend
@@ -1705,20 +1850,20 @@ def _renderizar_cdbs():
     # Linha de totais
     rent_total_pct = (total_rendimento / total_aplicado * 100) if total_aplicado > 0 else 0
     sep_r = len(_cdbs) + 2
-    tk.Frame(tbl, bg="#1a2a1a", height=1).grid(
+    tk.Frame(tbl, bg="#2e2e2e", height=1).grid(
         row=sep_r, column=0, columnspan=len(cols), sticky="ew", pady=2)
     tot_row = sep_r + 1
     resumo = [
-        ("TOTAL",                     "#FFD600"),
-        (f"{total_aplicado:,.2f}",    "#FFD600"),
-        ("", " "), ("", " "), ("", " "),
-        (f"{total_rendimento:+,.2f}", "#00E676"),
-        (f"{total_atual:,.2f}",       "#00E676"),
-        (f"{rent_total_pct:.2f}%",    "#00E676"),
-        ("", ""),
+        ("TOTAL",                     "#e60000"),
+        (f"{total_aplicado:,.2f}",    "#e60000"),
+        ("", "#aaaaaa"), ("", "#aaaaaa"), ("", "#aaaaaa"), ("", "#aaaaaa"),
+        (f"{total_rendimento:+,.2f}", "#cc0000"),
+        (f"{total_atual:,.2f}",       "#cc0000"),
+        (f"{rent_total_pct:.2f}%",    "#cc0000"),
+        ("", "#aaaaaa"), ("", ""),
     ]
     for c, (val, fg) in enumerate(resumo):
-        tk.Label(tbl, text=val, bg="#0d1f2d", fg=fg,
+        tk.Label(tbl, text=val, bg="#1c1c1c", fg=fg,
                  font=("Arial", 8, "bold"), width=widths[c],
                  anchor="center").grid(row=tot_row, column=c, padx=1, pady=3, sticky="ew")
 
@@ -1808,10 +1953,15 @@ def _grafico_evolucao_com_dados(dados, carteira, frame_pai):
             except: pass
         if patrimonio_total.empty:
             return
-        fig = plt.figure(figsize=(11, 3.0)); fig.patch.set_facecolor("#0a0a14")
-        ax  = fig.add_axes([0.07, 0.20, 0.88, 0.70]); ax.set_facecolor("#0a0a14")
+        fig = plt.figure(figsize=(11, 3.0)); fig.patch.set_facecolor("#111111")
+        ax  = fig.add_axes([0.07, 0.20, 0.88, 0.70]); ax.set_facecolor("#161616")
         ax.fill_between(patrimonio_total.index, patrimonio_total.values, alpha=0.2, color=ACCENT)
-        ax.plot(patrimonio_total.index, patrimonio_total.values, color=ACCENT, linewidth=2)
+        ax.plot(patrimonio_total.index, patrimonio_total.values, color=ACCENT, linewidth=2, label="Patrimônio")
+        # Linha de custo total investido
+        custo_total = sum(float(p["qtd"])*float(p["preco_medio"]) for p in carteira.values())
+        ax.axhline(custo_total, color="#FF9915", linewidth=1.2, linestyle="--", alpha=0.8, label=f"Custo R$ {custo_total:,.0f}")
+        leg = ax.legend(loc="upper left", frameon=False, fontsize=7)
+        for t in leg.get_texts(): t.set_color("#FFF")
         ax.set_title("Evolução do Patrimônio", color=TXT, fontsize=10, fontweight="bold")
         ax.yaxis.set_major_formatter(FuncFormatter(lambda x,_: f"R$ {x:,.0f}"))
         import matplotlib.dates as md3
@@ -1823,7 +1973,7 @@ def _grafico_evolucao_com_dados(dados, carteira, frame_pai):
         canvas = FigureCanvasTkAgg(fig, master=frame_pai)
         canvas.draw(); canvas.get_tk_widget().pack(fill="both", expand=True)
     except Exception as e:
-        tk.Label(frame_pai, text=f"Erro no gráfico: {e}", bg="#0a0a14",
+        tk.Label(frame_pai, text=f"Erro no gráfico: {e}", bg="#161616",
                  fg="#FF5252", font=("Arial",8)).pack()
 
 def _montar_tabela_risco(carteira, frame_pai):
@@ -1831,10 +1981,10 @@ def _montar_tabela_risco(carteira, frame_pai):
     for w in frame_pai.winfo_children(): w.destroy()
     if not carteira:
         tk.Label(frame_pai, text="Adicione ativos para ver indicadores de risco.",
-                 bg="#0a0a14", fg="#555", font=("Arial", 8, "italic"), pady=8).pack()
+                 bg="#161616", fg="#cc0000", font=("Arial", 8, "italic"), pady=8).pack()
         return
     tk.Label(frame_pai, text="⏳ Calculando Beta, Sharpe e Drawdown...",
-             bg="#0a0a14", fg=ACCENT, font=("Arial", 8), pady=6).pack()
+             bg="#161616", fg=ACCENT, font=("Arial", 8), pady=6).pack()
     def _calc():
         try:
             ind = _calcular_indicadores_avancados_carteira(carteira, {})
@@ -1842,43 +1992,43 @@ def _montar_tabela_risco(carteira, frame_pai):
         except Exception as e:
             root.after(0, lambda: [w.destroy() for w in frame_pai.winfo_children()] or
                        tk.Label(frame_pai, text=f"Erro ao calcular indicadores.",
-                                bg="#0a0a14", fg="#FF5252", font=("Arial",8)).pack())
+                                bg="#161616", fg="#FF5252", font=("Arial",8)).pack())
     threading.Thread(target=_calc, daemon=True).start()
 
 def _renderizar_tabela_risco(indicadores, frame_pai):
     for w in frame_pai.winfo_children(): w.destroy()
     if not indicadores:
         tk.Label(frame_pai, text="Não foi possível calcular indicadores.",
-                 bg="#0a0a14", fg="#555", font=("Arial", 8, "italic"), pady=8).pack()
+                 bg="#161616", fg="#cc0000", font=("Arial", 8, "italic"), pady=8).pack()
         return
-    CAB_BG = "#0d1a24"
+    CAB_BG = "#1c1c1c"
     cols   = ["Ativo", "Beta", "Sharpe", "Drawdown Máx."]
     widths = [10, 8, 8, 14]
     tbl = tk.Frame(frame_pai, bg=CAB_BG); tbl.pack(fill="x", padx=6)
     for c,(col,w) in enumerate(zip(cols,widths)):
-        tk.Label(tbl, text=col, bg=CAB_BG, fg="#EA80FC",
+        tk.Label(tbl, text=col, bg=CAB_BG, fg="#cc0000",
                  font=("Arial",8,"bold"), width=w,
                  anchor="center").grid(row=0,column=c,padx=1,pady=3,sticky="ew")
     tk.Frame(tbl, bg="#2a1a2a", height=1).grid(row=1,column=0,columnspan=4,sticky="ew")
     for idx,(ticker,ind) in enumerate(indicadores.items()):
-        row_bg = "#0a0a14" if idx%2==0 else "#0d0d1a"
+        row_bg = "#161616" if idx%2==0 else "#202020"
         ri     = idx+2
         beta_s = f"{ind['beta']:.2f}"  if ind['beta']    is not None else "N/D"
         shar_s = f"{ind['sharpe']:.2f}" if ind['sharpe'] is not None else "N/D"
         dd_s   = f"{ind['drawdown']:.1f}%" if ind['drawdown'] is not None else "N/D"
-        cor_beta  = "#00E676" if ind['beta'] is not None and ind['beta']<1 else "#FF5252" if ind['beta'] is not None else "#888"
-        cor_sharp = "#00E676" if ind['sharpe'] is not None and ind['sharpe']>0 else "#FF5252" if ind['sharpe'] is not None else "#888"
-        cor_dd    = "#FFD600" if ind['drawdown'] is not None and ind['drawdown']>-15 else "#FF5252" if ind['drawdown'] is not None else "#888"
-        dados_row = [(nome_exibicao(ticker),"#cccccc"),(beta_s,cor_beta),(shar_s,cor_sharp),(dd_s,cor_dd)]
+        cor_beta  = "#cc0000" if ind['beta'] is not None and ind['beta']<1 else "#FF5252" if ind['beta'] is not None else "#888"
+        cor_sharp = "#cc0000" if ind['sharpe'] is not None and ind['sharpe']>0 else "#FF5252" if ind['sharpe'] is not None else "#888"
+        cor_dd    = "#e60000" if ind['drawdown'] is not None and ind['drawdown']>-15 else "#FF5252" if ind['drawdown'] is not None else "#888"
+        dados_row = [(nome_exibicao(ticker),"#e0e0e0"),(beta_s,cor_beta),(shar_s,cor_sharp),(dd_s,cor_dd)]
         for c,(val,fg) in enumerate(dados_row):
             tk.Label(tbl,text=val,bg=row_bg,fg=fg,
                      font=("Arial",8),width=widths[c],
                      anchor="center").grid(row=ri,column=c,padx=1,pady=2,sticky="ew")
 
     # Legenda
-    leg = tk.Frame(frame_pai, bg="#0a0a14"); leg.pack(fill="x", padx=8, pady=4)
+    leg = tk.Frame(frame_pai, bg="#161616"); leg.pack(fill="x", padx=8, pady=4)
     tk.Label(leg, text="Beta<1 = menos volátil que o mercado  |  Sharpe>0 = retorno acima do risco  |  Drawdown = maior queda do pico",
-             bg="#0a0a14", fg="#555555", font=("Arial", 7), anchor="w").pack(fill="x")
+             bg="#161616", fg="#cc0000", font=("Arial", 7), anchor="w").pack(fill="x")
 
 # ── 7. Comparativo com Benchmarks ──
 def _montar_grafico_benchmark(carteira, frame_pai):
@@ -1886,10 +2036,10 @@ def _montar_grafico_benchmark(carteira, frame_pai):
     for w in frame_pai.winfo_children(): w.destroy()
     if not carteira:
         tk.Label(frame_pai, text="Adicione ações para ver a comparação com benchmarks.",
-                 bg="#0a0a14", fg="#555", font=("Arial", 8, "italic"), pady=8).pack()
+                 bg="#161616", fg="#cc0000", font=("Arial", 8, "italic"), pady=8).pack()
         return
     tk.Label(frame_pai, text="⏳ Buscando dados do Ibovespa e CDI...",
-             bg="#0a0a14", fg=ACCENT, font=("Arial",8), pady=6).pack()
+             bg="#161616", fg=ACCENT, font=("Arial",8), pady=6).pack()
     def _buscar():
         try:
             datas = []
@@ -1908,14 +2058,14 @@ def _montar_grafico_benchmark(carteira, frame_pai):
         except Exception as e:
             root.after(0, lambda: [w.destroy() for w in frame_pai.winfo_children()] or
                        tk.Label(frame_pai, text="Erro ao buscar benchmarks.",
-                                bg="#0a0a14", fg="#FF5252", font=("Arial",8)).pack())
+                                bg="#161616", fg="#FF5252", font=("Arial",8)).pack())
     threading.Thread(target=_buscar, daemon=True).start()
 
 def _renderizar_benchmark(dados, ibov, carteira, frame_pai, start, end):
     import pandas as pd, numpy as np
     for w in frame_pai.winfo_children(): w.destroy()
-    fig = plt.figure(figsize=(11, 3.0)); fig.patch.set_facecolor("#0a0a14")
-    ax  = fig.add_axes([0.07, 0.20, 0.88, 0.70]); ax.set_facecolor("#0a0a14")
+    fig = plt.figure(figsize=(11, 3.0)); fig.patch.set_facecolor("#111111")
+    ax  = fig.add_axes([0.07, 0.20, 0.88, 0.70]); ax.set_facecolor("#161616")
     tickers = list(carteira.keys())
     # Carteira ponderada por custo
     try:
@@ -1938,7 +2088,7 @@ def _renderizar_benchmark(dados, ibov, carteira, frame_pai, start, end):
         datas_cdi = pd.date_range(start, end, freq="B")
         td = (1+CDI_ANUAL)**(1/252)-1
         cdi_vals = 100*np.cumprod([1+td]*len(datas_cdi))
-        ax.plot(datas_cdi, cdi_vals, color="#FFD600", linewidth=1.2, linestyle=":", label="CDI")
+        ax.plot(datas_cdi, cdi_vals, color="#e60000", linewidth=1.2, linestyle=":", label="CDI")
     except: pass
     ax.set_title("Carteira vs Benchmarks (Base 100)", color=TXT, fontsize=10, fontweight="bold")
     ax.axhline(100, color="#333", linewidth=0.7, linestyle="-")
@@ -1963,16 +2113,16 @@ def _gerar_alertas_carteira(rows):
         if r["lucro_pct"] <= -15:
             alertas.append(("🔴", f"{r['nome']} caiu {r['lucro_pct']:.1f}% desde sua compra — avalie sua posição.", "#FF5252"))
         elif r["lucro_pct"] <= -8:
-            alertas.append(("🟡", f"{r['nome']} está {r['lucro_pct']:.1f}% abaixo do preço médio.", "#FFD600"))
+            alertas.append(("🟡", f"{r['nome']} está {r['lucro_pct']:.1f}% abaixo do preço médio.", "#e60000"))
         # Alta expressiva
         if r["lucro_pct"] >= 30:
-            alertas.append(("🟢", f"{r['nome']} valorizou {r['lucro_pct']:.1f}% — considere realizar parte do lucro.", "#00E676"))
+            alertas.append(("🟢", f"{r['nome']} valorizou {r['lucro_pct']:.1f}% — considere realizar parte do lucro.", "#cc0000"))
         # Comparação com CDI
         try:
             cdi = _cdi_desde_compra(r["data_compra"])
             if cdi and r["lucro_pct"] < cdi:
                 diff = cdi - r["lucro_pct"]
-                alertas.append(("💛", f"{r['nome']} está {diff:.1f}% abaixo do CDI no mesmo período.", "#FFD600"))
+                alertas.append(("💛", f"{r['nome']} está {diff:.1f}% abaixo do CDI no mesmo período.", "#e60000"))
         except: pass
     # Concentração setorial
     setores = {}
@@ -1981,22 +2131,22 @@ def _gerar_alertas_carteira(rows):
         setores[s] = setores.get(s,[]) + [r["nome"]]
     for setor, nomes in setores.items():
         if len(nomes) >= 2:
-            alertas.append(("⚡", f"Concentração em {setor}: {', '.join(nomes)}. Considere diversificar.", "#FF9100"))
+            alertas.append(("⚡", f"Concentração em {setor}: {', '.join(nomes)}. Considere diversificar.", "#FF9915"))
     if not alertas:
-        alertas.append(("✅", "Nenhum alerta no momento. Carteira dentro dos parâmetros normais.", "#00E676"))
+        alertas.append(("✅", "Nenhum alerta no momento. Carteira dentro dos parâmetros normais.", "#cc0000"))
     return alertas
 
 def _montar_alertas(rows, frame_pai):
     for w in frame_pai.winfo_children(): w.destroy()
     if not rows:
         tk.Label(frame_pai, text="Adicione ações à carteira para ver os alertas.",
-                 bg="#0a0a14", fg="#555555", font=("Arial", 8, "italic"), pady=8).pack()
+                 bg="#161616", fg="#cc0000", font=("Arial", 8, "italic"), pady=8).pack()
         return
     alertas = _gerar_alertas_carteira(rows)
     for icone, texto, cor in alertas:
-        row = tk.Frame(frame_pai, bg="#0a0a14"); row.pack(fill="x", padx=8, pady=2)
-        tk.Label(row, text=icone, bg="#0a0a14", font=("Arial",10), width=2).pack(side="left")
-        tk.Label(row, text=texto, bg="#0a0a14", fg=cor,
+        row = tk.Frame(frame_pai, bg="#161616"); row.pack(fill="x", padx=8, pady=2)
+        tk.Label(row, text=icone, bg="#161616", font=("Arial",10), width=2).pack(side="left")
+        tk.Label(row, text=texto, bg="#161616", fg=cor,
                  font=("Arial",8), anchor="w", wraplength=900).pack(side="left", fill="x", expand=True)
 
 # ── 9. Score de Diversificação ──
@@ -2024,19 +2174,19 @@ def _calcular_score_diversificacao(carteira):
 def _montar_score_div(carteira, frame_pai):
     for w in frame_pai.winfo_children(): w.destroy()
     score, msg = _calcular_score_diversificacao(carteira)
-    cor = "#00E676" if score>=8 else "#FFD600" if score>=5 else "#FF5252"
+    cor = "#cc0000" if score>=8 else "#e60000" if score>=5 else "#FF5252"
     # Linha com barra
-    row = tk.Frame(frame_pai, bg="#0a0a14"); row.pack(fill="x", padx=10, pady=6)
-    tk.Label(row, text="Score de Diversificação:", bg="#0a0a14", fg="#aaaaaa",
+    row = tk.Frame(frame_pai, bg="#161616"); row.pack(fill="x", padx=10, pady=6)
+    tk.Label(row, text="Score de Diversificação:", bg="#161616", fg="#aaaaaa",
              font=("Arial",9,"bold")).pack(side="left")
     BAR_W = 160
-    c_bar = tk.Canvas(row, width=BAR_W, height=12, bg="#0a0a14", highlightthickness=0)
+    c_bar = tk.Canvas(row, width=BAR_W, height=12, bg="#161616", highlightthickness=0)
     c_bar.pack(side="left", padx=8)
-    c_bar.create_rectangle(0,0,BAR_W,12,fill="#1a1a2a",outline="")
+    c_bar.create_rectangle(0,0,BAR_W,12,fill="#2e2e2e",outline="")
     c_bar.create_rectangle(0,0,int(score/10*BAR_W),12,fill=cor,outline="")
-    tk.Label(row, text=f"{score}/10", bg="#0a0a14", fg=cor,
+    tk.Label(row, text=f"{score}/10", bg="#161616", fg=cor,
              font=("Arial",9,"bold")).pack(side="left", padx=4)
-    tk.Label(frame_pai, text=msg, bg="#0a0a14", fg=cor,
+    tk.Label(frame_pai, text=msg, bg="#161616", fg=cor,
              font=("Arial",8), anchor="w", padx=10).pack(fill="x")
 
 # ── 10. Resumo Executivo ──
@@ -2066,38 +2216,52 @@ def _montar_resumo_executivo(rows, carteira, frame_pai):
     for w in frame_pai.winfo_children(): w.destroy()
     if not rows:
         tk.Label(frame_pai, text="Adicione ativos à carteira para ver o resumo executivo.",
-                 bg="#0a0a14", fg="#555", font=("Arial", 8, "italic"), pady=8).pack()
+                 bg="#161616", fg="#cc0000", font=("Arial", 8, "italic"), pady=8).pack()
         return
     texto = _gerar_resumo_executivo(rows, carteira)
-    tk.Label(frame_pai, text=texto, bg="#0a0a14", fg="#cccccc",
+    tk.Label(frame_pai, text=texto, bg="#161616", fg="#e0e0e0",
              font=("Arial", 9), anchor="w", justify="left",
              wraplength=1100, padx=12, pady=10).pack(fill="x")
 
 def _buscar_precos_carteira(tickers):
-    """Retorna dict {ticker: preco_atual} para todos os ativos da carteira."""
+    """Retorna dict {ticker: preco_atual} — ignora ativos inválidos/delistados."""
     precos = {}
     for t in tickers:
+        t = t.strip()  # remove espaços extras que corrompem o yfinance
+        if not t:
+            continue
         try:
             hist = yf.Ticker(t).history(period="2d")
-            if not hist.empty:
-                precos[t] = float(hist["Close"].iloc[-1])
+            if hist is not None and not hist.empty and "Close" in hist.columns:
+                preco = float(hist["Close"].dropna().iloc[-1])
+                if preco > 0:
+                    precos[t] = preco
         except Exception:
-            pass
+            pass  # ignora 404, delistados, sem dados
     return precos
 
 def _calcular_pl(carteira, precos):
-    """Retorna lista de dicts com P&L por ativo."""
+    """Retorna lista de dicts com P&L por ativo. Ignora ativos sem preço."""
     rows = []
     for ticker, pos in carteira.items():
         preco_atual = precos.get(ticker)
-        if preco_atual is None:
-            continue
+        if preco_atual is None or preco_atual <= 0:
+            continue  # ativo delistado ou sem dados — ignora silenciosamente
         qtd         = float(pos["qtd"])
+        pm          = float(pos["preco_edio"] if "preco_medio" not in pos else pos["preco_medio"])
         pm          = float(pos["preco_medio"])
         custo       = qtd * pm
         patrimonio  = qtd * preco_atual
         lucro_rs    = patrimonio - custo
         lucro_pct   = (lucro_rs / custo * 100) if custo > 0 else 0
+        # Tendência vs preço médio
+        diff_pm = ((preco_atual - pm) / pm * 100) if pm > 0 else 0
+        if diff_pm > 2:
+            tendencia = ("↑ Alta",    "#00C896")
+        elif diff_pm < -2:
+            tendencia = ("↓ Queda",   "#FF5252")
+        else:
+            tendencia = ("→ Lateral", "#e60000")
         rows.append({
             "ticker":     ticker,
             "nome":       nome_exibicao(ticker),
@@ -2109,6 +2273,7 @@ def _calcular_pl(carteira, precos):
             "lucro_rs":   lucro_rs,
             "lucro_pct":  lucro_pct,
             "data_compra":pos.get("data_compra", "—"),
+            "tendencia":  tendencia,
         })
     return rows
 
@@ -2129,7 +2294,7 @@ def _grafico_evolucao_carteira(carteira, frame_pai):
 
     if not carteira:
         tk.Label(frame_pai, text="Adicione ativos à carteira para ver a evolução.",
-                 bg="#0a0a14", fg="#555", font=("Arial", 9, "italic"), pady=20).pack()
+                 bg="#161616", fg="#cc0000", font=("Arial", 9, "italic"), pady=20).pack()
         return
 
     # Descobre data mais antiga
@@ -2153,9 +2318,9 @@ def _grafico_evolucao_carteira(carteira, frame_pai):
         return
 
     fig = plt.figure(figsize=(11, 3.2))
-    fig.patch.set_facecolor("#0a0a14")
+    fig.patch.set_facecolor("#111111")
     ax  = fig.add_axes([0.07, 0.18, 0.90, 0.72])
-    ax.set_facecolor("#0a0a14")
+    ax.set_facecolor("#161616")
 
     import pandas as pd
     patrimonio_total = pd.Series(dtype=float)
@@ -2174,9 +2339,9 @@ def _grafico_evolucao_carteira(carteira, frame_pai):
         return
 
     ax.fill_between(patrimonio_total.index, patrimonio_total.values,
-                    alpha=0.25, color="#00E5FF")
+                    alpha=0.25, color="#cc0000")
     ax.plot(patrimonio_total.index, patrimonio_total.values,
-            color="#00E5FF", linewidth=2)
+            color="#cc0000", linewidth=2)
 
     ax.set_title("Evolução do Patrimônio", color=TXT, fontsize=11, fontweight="bold")
     ax.set_ylabel("R$", color=TXT)
@@ -2231,7 +2396,7 @@ def _adicionar_posicao():
         msg = f"✔ {nome_exibicao(ticker)} adicionado à carteira!"
 
     _salvar_carteira(_carteira)
-    lbl_cart_status.config(text=msg, fg="#00E676")
+    lbl_cart_status.config(text=msg, fg="#cc0000")
     _atualizar_carteira_ui()
 
 def _remover_posicao(ticker):
@@ -2318,29 +2483,16 @@ def _aplicar_resultados(resultado):
         return
 
     # Alertas (síncrono, rápido)
-    _montar_alertas(rows, frame_cart_alertas)
 
     # Score diversificação (síncrono, rápido)
-    _montar_score_div(_carteira, frame_cart_score)
 
     # Resumo executivo (síncrono, rápido)
-    _montar_resumo_executivo(rows, _carteira, frame_cart_resumo)
 
     # Gráfico evolução
     if dados_hist is not None and not dados_hist.empty:
         _grafico_evolucao_com_dados(dados_hist, _carteira, frame_cart_grafico)
 
-    # Gráfico benchmark
-    if dados_hist is not None and not dados_hist.empty:
-        _renderizar_benchmark(dados_hist, ibov, _carteira, frame_cart_benchmark,
-                              min([datetime.strptime(p["data_compra"],"%d/%m/%Y") for p in _carteira.values()]).strftime("%Y-%m-%d"),
-                              datetime.now().strftime("%Y-%m-%d"))
-
-    # Indicadores de risco
-    if indicadores:
-        _renderizar_tabela_risco(indicadores, frame_cart_risco)
-
-    lbl_cart_status.config(text=f"✔ Carteira atualizada — {len(rows)} ativo(s)", fg="#00E676")
+    lbl_cart_status.config(text=f"✔ Carteira atualizada — {len(rows)} ativo(s)", fg="#cc0000")
 
 def _renderizar_carteira(precos):
     """Renderiza tabela P&L + totais + gráfico."""
@@ -2353,14 +2505,14 @@ def _renderizar_carteira(precos):
         for w in frame_cart_tabela.winfo_children(): w.destroy()
         tk.Label(frame_cart_tabela,
                  text="Nenhum ativo adicionado. Use o formulário acima para adicionar ações.",
-                 bg="#0a0a14", fg="#555555", font=("Arial", 9, "italic"), pady=16).pack()
+                 bg="#161616", fg="#cc0000", font=("Arial", 9, "italic"), pady=16).pack()
         lbl_cart_status.config(text="", fg="#aaaaaa")
         return
 
     # Cabeçalho da tabela
-    CAB_BG = "#0d1a24"
-    cols   = ["Ativo","Qtd","P.M. (R$)","Atual (R$)","Custo (R$)","Patrim. (R$)","Lucro R$","Lucro %","CDI%","Ação"]
-    widths = [7,5,9,9,10,10,10,8,8,5]
+    CAB_BG = "#1c1c1c"
+    cols   = ["Ativo","Tend.","Qtd","P.M. (R$)","Atual (R$)","Custo (R$)","Patrim. (R$)","Lucro R$","Lucro %","CDI%","Ação"]
+    widths = [7,8,4,8,8,10,10,10,8,7,4]
 
     tbl = tk.Frame(frame_cart_tabela, bg=CAB_BG)
     tbl.pack(fill="x", padx=6)
@@ -2370,25 +2522,27 @@ def _renderizar_carteira(precos):
                  font=("Arial",8,"bold"), width=w,
                  anchor="center").grid(row=0,column=c,padx=1,pady=3,sticky="ew")
 
-    tk.Frame(tbl, bg="#1a2a3a", height=1).grid(
+    tk.Frame(tbl, bg="#2e2e2e", height=1).grid(
         row=1, column=0, columnspan=len(cols), sticky="ew")
 
     total_custo = total_patrim = total_lucro = 0
 
     for idx, r in enumerate(rows):
-        row_bg  = "#0a0a14" if idx%2==0 else "#0d0d1a"
-        cor_ret = "#00E676" if r["lucro_rs"] >= 0 else "#FF5252"
+        row_bg  = "#161616" if idx%2==0 else "#202020"
+        cor_ret = "#00C896" if r["lucro_rs"] >= 0 else "#FF5252"
         cdi_ret = _cdi_desde_compra(r["data_compra"])
         cdi_txt = f"{cdi_ret:.2f}%" if cdi_ret else "—"
         ri      = idx + 2
 
+        tend_txt, tend_cor = r.get("tendencia", ("—", "#888888"))
         dados_row = [
             (nome_exibicao(r["ticker"]), CORES_ATIVOS[list(_carteira.keys()).index(r["ticker"]) % len(CORES_ATIVOS)]),
-            (f"{r['qtd']:.0f}",          "#cccccc"),
-            (f"{r['pm']:.2f}",           "#cccccc"),
-            (f"{r['preco_atual']:.2f}",  "#cccccc"),
-            (f"{r['custo']:,.2f}",       "#cccccc"),
-            (f"{r['patrimonio']:,.2f}",  "#cccccc"),
+            (tend_txt,                   tend_cor),
+            (f"{r['qtd']:.0f}",          "#e0e0e0"),
+            (f"{r['pm']:.2f}",           "#e0e0e0"),
+            (f"{r['preco_atual']:.2f}",  "#e0e0e0"),
+            (f"{r['custo']:,.2f}",       "#e0e0e0"),
+            (f"{r['patrimonio']:,.2f}",  "#e0e0e0"),
             (f"{r['lucro_rs']:+,.2f}",   cor_ret),
             (f"{r['lucro_pct']:+.2f}%",  cor_ret),
             (cdi_txt,                    "#aaaaaa"),
@@ -2398,11 +2552,11 @@ def _renderizar_carteira(precos):
                      font=("Arial",8), width=widths[c],
                      anchor="center").grid(row=ri,column=c,padx=1,pady=2,sticky="ew")
 
-        # Botão remover
-        tk.Button(tbl, text="✕", bg="#1a0a0a", fg="#FF5252",
+        # Botão remover (coluna 10 = última)
+        tk.Button(tbl, text="✕", bg="#2a0000", fg="#FF5252",
                   font=("Arial",8,"bold"), relief="flat", cursor="hand2", width=2,
                   command=lambda t=r["ticker"]: _remover_posicao(t)
-                  ).grid(row=ri, column=9, padx=1, pady=2)
+                  ).grid(row=ri, column=10, padx=1, pady=2)
 
         total_custo   += r["custo"]
         total_patrim  += r["patrimonio"]
@@ -2410,42 +2564,55 @@ def _renderizar_carteira(precos):
 
     # Totais
     total_pct = (total_lucro/total_custo*100) if total_custo>0 else 0
-    cor_tot   = "#00E676" if total_lucro>=0 else "#FF5252"
+    cor_tot   = "#00C896" if total_lucro>=0 else "#FF5252"
     sep_r     = len(rows)+2
-    tk.Frame(tbl, bg="#1a2a3a", height=1).grid(
+    tk.Frame(tbl, bg="#2e2e2e", height=1).grid(
         row=sep_r, column=0, columnspan=len(cols), sticky="ew", pady=2)
     tot_row = sep_r+1
+    COR_VAZIO = "#1c1c1c"  # mesma cor do fundo = invisível
     resumo = [
-        ("TOTAL","#FFD600"),(""," "),(""," "),(""," "),
-        (f"{total_custo:,.2f}","#FFD600"),
-        (f"{total_patrim:,.2f}","#FFD600"),
+        ("TOTAL","#e60000"),("",COR_VAZIO),("",COR_VAZIO),("",COR_VAZIO),("",COR_VAZIO),
+        (f"{total_custo:,.2f}","#e60000"),
+        (f"{total_patrim:,.2f}","#e60000"),
         (f"{total_lucro:+,.2f}",cor_tot),
-        (f"{total_pct:+.2f}%", cor_tot),
-        (""," "),("",""),
+        (f"{total_pct:+.2f}%",cor_tot),
+        ("",COR_VAZIO),("",COR_VAZIO),
     ]
     for c,(val,fg) in enumerate(resumo):
-        tk.Label(tbl, text=val, bg="#0d1a24", fg=fg,
+        tk.Label(tbl, text=val, bg="#1c1c1c", fg=fg,
                  font=("Arial",8,"bold"), width=widths[c],
                  anchor="center").grid(row=tot_row,column=c,padx=1,pady=3,sticky="ew")
 
+    # Registra snapshot no histórico SQLite
+    try:
+        _registrar_patrimonio(
+            custo_total = total_custo,
+            patrimonio  = total_patrim,
+            lucro_rs    = total_lucro,
+            lucro_pct   = (total_lucro / total_custo * 100) if total_custo > 0 else 0,
+            n_ativos    = len(rows),
+        )
+    except Exception as e:
+        print(f"[SQLite] Erro no registro automático: {e}")
     lbl_cart_status.config(text=f"⏳ Calculando seções avançadas...", fg="#aaaaaa")
 
 # ======================================================
 # UI — CARD CARTEIRA PESSOAL (Etapa 5)
 # ======================================================
-CART_BG  = "#0a0a14"
-CART_ACC = "#00E5FF"
+CART_BG  = "#161616"
+CART_ACC = "#cc0000"
+CART_BORDER = "#e60000"
 
-frame_cart_outer = tk.Frame(frame_conteudo, bg=CART_ACC)
+frame_cart_outer = tk.Frame(frame_conteudo, bg="#e60000")
 frame_cart_outer.pack(fill="x", pady=(10, 0))
 
 frame_cart = tk.Frame(frame_cart_outer, bg=CART_BG)
 frame_cart.pack(fill="both", expand=True, padx=2, pady=2)
 
 # Cabeçalho
-cab_cart = tk.Frame(frame_cart, bg="#050510")
+cab_cart = tk.Frame(frame_cart, bg="#0d0d0d")
 cab_cart.pack(fill="x")
-tk.Label(cab_cart, text="💼  Carteira Pessoal", bg="#050510", fg=CART_ACC,
+tk.Label(cab_cart, text="💼  Carteira Pessoal", bg="#0d0d0d", fg=CART_ACC,
          font=("Arial", 11, "bold"), pady=6).pack(side="left", padx=12)
 btn_atualizar_cart = tk.Button(cab_cart, text="↻ Atualizar", bg=BTN, fg=CART_ACC,
           font=("Arial", 8, "bold"), relief="flat", cursor="hand2",
@@ -2496,7 +2663,7 @@ tk.Button(col_b, text="＋ Adicionar", bg=CART_ACC, fg="#000000",
           font=("Arial", 9, "bold"), relief="flat", cursor="hand2",
           command=_adicionar_posicao).pack()
 
-lbl_cart_status = tk.Label(frame_cart, text="", bg=CART_BG, fg="#00E676",
+lbl_cart_status = tk.Label(frame_cart, text="", bg=CART_BG, fg="#cc0000",
                              font=("Arial", 8), pady=2)
 lbl_cart_status.pack()
 
@@ -2506,12 +2673,12 @@ frame_cart_tabela.pack(fill="x", padx=4, pady=(0,4))
 
 
 # -- Separador visual entre ações e CDBs --
-tk.Frame(frame_cart, bg="#1a1a2a", height=2).pack(fill="x", padx=10, pady=(8,0))
+tk.Frame(frame_cart, bg="#2e2e2e", height=2).pack(fill="x", padx=10, pady=(8,0))
 
 # Cabeçalho CDB
-cab_cdb_cart = tk.Frame(frame_cart, bg="#050520")
+cab_cdb_cart = tk.Frame(frame_cart, bg="#0d0d0d")
 cab_cdb_cart.pack(fill="x")
-tk.Label(cab_cdb_cart, text="🏦  CDBs na Carteira", bg="#050520", fg="#FFD600",
+tk.Label(cab_cdb_cart, text="🏦  CDBs na Carteira", bg="#0d0d0d", fg="#e60000",
          font=("Arial", 10, "bold"), pady=5).pack(side="left", padx=12)
 
 # Formulário CDB
@@ -2553,12 +2720,21 @@ entry_cdb_data.insert(0, "01/01/2025")
 entry_cdb_data.pack()
 
 cdb_c5 = tk.Frame(frame_cdb_cart_form, bg=CART_BG); cdb_c5.pack(side="left", padx=(0,6))
-_mk_cdb(cdb_c5, " ")
-tk.Button(cdb_c5, text="＋ Adicionar CDB", bg="#FFD600", fg="#000000",
+_mk_cdb(cdb_c5, "Vencimento (opc.)")
+entry_cdb_venc = tk.Entry(cdb_c5, width=11, bg=BTN, fg="#888888",
+                           insertbackground=TXT, font=("Arial", 9), justify="center")
+entry_cdb_venc.insert(0, "DD/MM/AAAA")
+entry_cdb_venc.bind("<FocusIn>",  lambda e: limpar_entry_placeholder(entry_cdb_venc, "DD/MM/AAAA"))
+entry_cdb_venc.bind("<FocusOut>", lambda e: restaurar_placeholder(entry_cdb_venc, "DD/MM/AAAA"))
+entry_cdb_venc.pack()
+
+cdb_c6 = tk.Frame(frame_cdb_cart_form, bg=CART_BG); cdb_c6.pack(side="left", padx=(0,6))
+_mk_cdb(cdb_c6, " ")
+tk.Button(cdb_c6, text="＋ Adicionar CDB", bg="#e60000", fg="#161616",
           font=("Arial", 9, "bold"), relief="flat", cursor="hand2",
           command=_adicionar_cdb).pack()
 
-lbl_cdb_status = tk.Label(frame_cart, text="", bg=CART_BG, fg="#00E676",
+lbl_cdb_status = tk.Label(frame_cart, text="", bg=CART_BG, fg="#cc0000",
                             font=("Arial", 8), pady=2)
 lbl_cdb_status.pack()
 
@@ -2570,57 +2746,7 @@ frame_cdb_cart_tabela.pack(fill="x", padx=4, pady=(0, 10))
 frame_cart_grafico = tk.Frame(frame_cart, bg=CART_BG)
 frame_cart_grafico.pack(fill="x", padx=4, pady=(0,4))
 
-# 7. Gráfico benchmark
-tk.Frame(frame_cart, bg="#1a1a2a", height=1).pack(fill="x", padx=10, pady=(4,0))
-tk.Label(frame_cart, text="📈  Carteira vs Benchmarks", bg="#050510", fg="#B2FF59",
-         font=("Arial", 9, "bold"), pady=4).pack(anchor="w", padx=12)
-frame_cart_benchmark = tk.Frame(frame_cart, bg=CART_BG)
-frame_cart_benchmark.pack(fill="x", padx=4, pady=(0,4))
 
-# 8. Alertas
-tk.Frame(frame_cart, bg="#1a1a2a", height=1).pack(fill="x", padx=10, pady=(4,0))
-tk.Label(frame_cart, text="🔔  Alertas Automáticos", bg="#050510", fg="#FF9100",
-         font=("Arial", 9, "bold"), pady=4).pack(anchor="w", padx=12)
-frame_cart_alertas = tk.Frame(frame_cart, bg="#0a0a14")
-frame_cart_alertas.pack(fill="x", padx=4, pady=(0,4))
-
-# 9. Score diversificação
-tk.Frame(frame_cart, bg="#1a1a2a", height=1).pack(fill="x", padx=10, pady=(4,0))
-tk.Label(frame_cart, text="🎯  Score de Diversificação", bg="#050510", fg="#00E676",
-         font=("Arial", 9, "bold"), pady=4).pack(anchor="w", padx=12)
-frame_cart_score = tk.Frame(frame_cart, bg="#0a0a14")
-frame_cart_score.pack(fill="x", padx=4, pady=(0,4))
-
-# 6. Indicadores de risco avançados
-tk.Frame(frame_cart, bg="#1a1a2a", height=1).pack(fill="x", padx=10, pady=(4,0))
-tk.Label(frame_cart, text="📊  Indicadores de Risco Avançados", bg="#050510", fg="#EA80FC",
-         font=("Arial", 9, "bold"), pady=4).pack(anchor="w", padx=12)
-frame_cart_risco = tk.Frame(frame_cart, bg="#0a0a14")
-frame_cart_risco.pack(fill="x", padx=4, pady=(0,4))
-
-# 10. Resumo executivo
-tk.Frame(frame_cart, bg="#1a1a2a", height=1).pack(fill="x", padx=10, pady=(4,0))
-tk.Label(frame_cart, text="📝  Resumo Executivo", bg="#050510", fg=ACCENT,
-         font=("Arial", 9, "bold"), pady=4).pack(anchor="w", padx=12)
-frame_cart_resumo = tk.Frame(frame_cart, bg="#0a0a14")
-frame_cart_resumo.pack(fill="x", padx=4, pady=(0,10))
-
-# ── Função de mensagens padrão (definida APÓS os frames existirem) ──
-def _init_carteira_frames():
-    """Preenche todos os frames da carteira com mensagens iniciais."""
-    msgs = [
-        (frame_cart_grafico,   "📉 Adicione ações e clique em ↻ Atualizar para ver a evolução."),
-        (frame_cart_benchmark, "📈 Adicione ações e clique em ↻ Atualizar para ver vs Benchmarks."),
-        (frame_cart_alertas,   "🔔 Adicione ações e clique em ↻ Atualizar para ver os alertas."),
-        (frame_cart_score,     "🎯 Adicione ações e clique em ↻ Atualizar para ver o score."),
-        (frame_cart_risco,     "📊 Adicione ações e clique em ↻ Atualizar para ver os indicadores."),
-        (frame_cart_resumo,    "📝 Adicione ações e clique em ↻ Atualizar para ver o resumo."),
-    ]
-    for frame, msg in msgs:
-        for w in frame.winfo_children(): w.destroy()
-        tk.Label(frame, text=msg, bg="#0a0a14", fg="#555555",
-                 font=("Arial", 8, "italic"), pady=8, anchor="w",
-                 padx=12).pack(fill="x")
 
 # ==============================
 # INICIALIZAR CHECKBOXES PADRÃO
@@ -2633,11 +2759,6 @@ for ticker in ATIVOS_PADRAO:
 
 # Mostra mensagem inicial no card de insights
 _montar_insights([], frame_insights)
-
-# Inicializa todos os frames da carteira com mensagens padrão
-# _init_carteira_frames movida para após criação dos frames
-
-_init_carteira_frames()
 
 # Se já tem ações salvas, carrega tudo
 try:
@@ -2653,5 +2774,406 @@ try:
     _renderizar_cdbs()
 except Exception:
     pass
+
+
+
+# ======================================================
+# UI — ETAPA 6: IA CONSULTORA
+# ======================================================
+IA_BG    = "#111111"
+IA_BORDA = "#cc0000"
+
+frame_ia_outer = tk.Frame(frame_conteudo, bg=IA_BORDA)
+frame_ia_outer.pack(fill="x", pady=(10, 0))
+
+frame_ia = tk.Frame(frame_ia_outer, bg=IA_BG)
+frame_ia.pack(fill="both", expand=True, padx=2, pady=2)
+
+# Cabeçalho
+cab_ia = tk.Frame(frame_ia, bg="#0d0d0d")
+cab_ia.pack(fill="x")
+tk.Label(cab_ia, text="🤖  IA Consultora", bg="#0d0d0d", fg=IA_BORDA,
+         font=("Arial", 11, "bold"), pady=6).pack(side="left", padx=12)
+tk.Label(cab_ia, text="Claude → GPT-4o-mini → Gemini  |  fallback automático", bg="#0d0d0d", fg="#555555",
+         font=("Arial", 8)).pack(side="left", padx=4)
+
+# Status das chaves
+def _status_chave(nome, chave):
+    ok  = "✔" if chave else "✘"
+    cor = "#00C896" if chave else "#FF5252"
+    return nome, ok, cor
+
+frame_ia_keys = tk.Frame(cab_ia, bg="#0d0d0d")
+frame_ia_keys.pack(side="right", padx=12)
+for nome, chave in [("Anthropic", ANTHROPIC_API_KEY), ("OpenAI", OPENAI_API_KEY), ("Gemini", GOOGLE_API_KEY)]:
+    n, ok, cor = _status_chave(nome, chave)
+    tk.Label(frame_ia_keys, text=f"{ok} {n}", bg="#0d0d0d", fg=cor,
+             font=("Arial", 8)).pack(side="left", padx=6)
+
+# Campo de pergunta
+frame_ia_input = tk.Frame(frame_ia, bg=IA_BG)
+frame_ia_input.pack(fill="x", padx=10, pady=(8, 4))
+
+tk.Label(frame_ia_input, text="Sua pergunta:", bg=IA_BG, fg="#aaaaaa",
+         font=("Arial", 8)).pack(anchor="w")
+
+frame_ia_row = tk.Frame(frame_ia_input, bg=IA_BG)
+frame_ia_row.pack(fill="x")
+
+entry_ia = tk.Entry(frame_ia_row, bg="#1c1c1c", fg="#e0e0e0",
+                    insertbackground="#e0e0e0", font=("Arial", 10),
+                    relief="flat")
+entry_ia.pack(side="left", fill="x", expand=True, ipady=6, padx=(0, 8))
+entry_ia.insert(0, "Ex: O que você acha da minha carteira atual?")
+entry_ia.bind("<FocusIn>",  lambda e: limpar_entry_placeholder(entry_ia, "Ex: O que você acha da minha carteira atual?"))
+entry_ia.bind("<FocusOut>", lambda e: restaurar_placeholder(entry_ia, "Ex: O que você acha da minha carteira atual?"))
+entry_ia.bind("<Return>", lambda e: _enviar_pergunta_ia())
+
+btn_ia = tk.Button(frame_ia_row, text="✦ Consultar", bg=IA_BORDA, fg="#e0e0e0",
+                   font=("Arial", 9, "bold"), relief="flat", cursor="hand2",
+                   command=lambda: _enviar_pergunta_ia())
+btn_ia.pack(side="left")
+
+# Sugestões rápidas
+frame_ia_sugestoes = tk.Frame(frame_ia, bg=IA_BG)
+frame_ia_sugestoes.pack(fill="x", padx=10, pady=(0, 6))
+tk.Label(frame_ia_sugestoes, text="Sugestões:", bg=IA_BG, fg="#555555",
+         font=("Arial", 7)).pack(side="left", padx=(0, 6))
+
+sugestoes = [
+    "Analise minha carteira",
+    "Qual meu maior risco?",
+    "Estou batendo o CDI?",
+    "Devo diversificar?",
+    "Qual ativo vender?",
+]
+for s in sugestoes:
+    tk.Button(frame_ia_sugestoes, text=s, bg="#2e2e2e", fg="#aaaaaa",
+              font=("Arial", 7), relief="flat", cursor="hand2",
+              command=lambda txt=s: _sugestao_ia(txt)).pack(side="left", padx=2)
+
+# Área de resposta
+frame_ia_resp = tk.Frame(frame_ia, bg=IA_BG)
+frame_ia_resp.pack(fill="x", padx=10, pady=(0, 10))
+
+txt_ia = tk.Text(frame_ia_resp, bg="#1c1c1c", fg="#e0e0e0",
+                 font=("Arial", 9), relief="flat", wrap="word",
+                 height=8, state="disabled", padx=10, pady=8)
+txt_ia.pack(fill="x")
+
+scroll_ia = tk.Scrollbar(frame_ia_resp, command=txt_ia.yview, bg="#2e2e2e")
+txt_ia.config(yscrollcommand=scroll_ia.set)
+
+# ── Funções da IA ──
+def _exibir_resposta_ia(texto):
+    txt_ia.config(state="normal")
+    txt_ia.delete("1.0", "end")
+    txt_ia.insert("end", texto)
+    txt_ia.config(state="disabled")
+    btn_ia.config(state="normal", text="✦ Consultar")
+
+def _sugestao_ia(texto):
+    entry_ia.delete(0, "end")
+    entry_ia.insert(0, texto)
+    entry_ia.config(fg="#e0e0e0")
+    _enviar_pergunta_ia()
+
+def _enviar_pergunta_ia():
+    pergunta = entry_ia.get().strip()
+    if not pergunta or pergunta == "Ex: O que você acha da minha carteira atual?":
+        return
+    btn_ia.config(state="disabled", text="⏳ Consultando...")
+    _exibir_resposta_ia("⏳ Processando com GPT-4o-mini e Claude Sonnet...")
+    def _rodar():
+        resposta = executar_tarefa_financeira(pergunta)
+        root.after(0, lambda: _exibir_resposta_ia(resposta))
+    threading.Thread(target=_rodar, daemon=True).start()
+
+# ======================================================
+# ETAPA 6 — IA CONSULTORA MULTI-LLM
+# GPT-4o-mini: processa dados brutos → JSON estruturado
+# Claude Sonnet: analisa JSON → resposta qualitativa
+# ======================================================
+
+def _montar_contexto_carteira():
+    """Monta dict com todos os dados atuais da carteira para enviar às IAs."""
+    ctx = {}
+    # Carteira de ações
+    if _carteira:
+        precos = _buscar_precos_carteira(list(_carteira.keys()))
+        rows   = _calcular_pl(_carteira, precos)
+        ctx["acoes"] = [
+            {
+                "ticker":     r["ticker"],
+                "nome":       r["nome"],
+                "qtd":        r["qtd"],
+                "preco_medio":r["pm"],
+                "preco_atual":r["preco_atual"],
+                "custo":      round(r["custo"], 2),
+                "patrimonio": round(r["patrimonio"], 2),
+                "lucro_rs":   round(r["lucro_rs"], 2),
+                "lucro_pct":  round(r["lucro_pct"], 2),
+                "data_compra":r["data_compra"],
+                "cdi_periodo":round(_cdi_desde_compra(r["data_compra"]) or 0, 2),
+            }
+            for r in rows
+        ]
+        ctx["total_custo"]  = round(sum(r["custo"]      for r in rows), 2)
+        ctx["total_patrim"] = round(sum(r["patrimonio"] for r in rows), 2)
+        ctx["total_lucro"]  = round(sum(r["lucro_rs"]   for r in rows), 2)
+    else:
+        ctx["acoes"] = []
+
+    # CDBs
+    ctx["cdbs"] = [
+        {
+            "nome":    c["nome"],
+            "valor":   c["valor"],
+            "pct_cdi": c["pct_cdi"],
+            "data":    c["data"],
+            "rendimento": round(_calcular_rendimento_cdb(c["valor"], c["pct_cdi"], c["data"])[0], 2),
+            "total":      round(_calcular_rendimento_cdb(c["valor"], c["pct_cdi"], c["data"])[1], 2),
+        }
+        for c in _cdbs
+    ]
+
+    # Score e CDI atual
+    ctx["cdi_anual_pct"] = CDI_ANUAL * 100
+    ctx["data_consulta"] = datetime.now().strftime("%d/%m/%Y %H:%M")
+
+    return ctx
+
+
+def _chamar_gpt(prompt_sistema, prompt_usuario):
+    """Chama GPT-4o-mini via requests (sem dependência de SDK)."""
+    import urllib.request, urllib.error
+
+    if len(prompt_usuario) > 8000:
+        prompt_usuario = prompt_usuario[:8000] + "\n...[dados truncados]"
+
+    payload = _json_mod.dumps({
+        "model": "gpt-4o-mini",
+        "messages": [
+            {"role": "system", "content": prompt_sistema},
+            {"role": "user",   "content": prompt_usuario},
+        ],
+        "max_tokens": 800,
+        "temperature": 0.3,
+    }, ensure_ascii=False).encode("utf-8")
+
+    req = urllib.request.Request(
+        "https://api.openai.com/v1/chat/completions",
+        data=payload,
+        headers={
+            "Content-Type":  "application/json",
+            "Authorization": f"Bearer {OPENAI_API_KEY.strip()}",
+        },
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            data = _json_mod.loads(resp.read().decode("utf-8"))
+        return data["choices"][0]["message"]["content"]
+    except urllib.error.HTTPError as e:
+        detalhe = e.read().decode("utf-8", errors="replace")
+        raise Exception(f"HTTP {e.code}: {detalhe}")
+
+
+
+
+
+def _chamar_claude(prompt_sistema, prompt_usuario):
+    """Chama Claude Sonnet via requests (sem dependência de SDK)."""
+    import urllib.request, urllib.error
+
+    # Limita tamanho para evitar payload gigante
+    if len(prompt_usuario) > 8000:
+        prompt_usuario = prompt_usuario[:8000] + "\n...[dados truncados]"
+
+    body = {
+        "model": "claude-3-5-sonnet-20241022",
+        "max_tokens": 1024,
+        "system": prompt_sistema,
+        "messages": [
+            {"role": "user", "content": prompt_usuario},
+        ],
+    }
+    payload = _json_mod.dumps(body, ensure_ascii=False).encode("utf-8")
+
+    req = urllib.request.Request(
+        "https://api.anthropic.com/v1/messages",
+        data=payload,
+        headers={
+            "Content-Type":      "application/json",
+            "x-api-key":         ANTHROPIC_API_KEY.strip(),
+            "anthropic-version": "2023-06-01",
+        },
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            data = _json_mod.loads(resp.read().decode("utf-8"))
+        return data["content"][0]["text"]
+    except urllib.error.HTTPError as e:
+        detalhe = e.read().decode("utf-8", errors="replace")
+        raise Exception(f"HTTP {e.code}: {detalhe}")
+
+
+def _chamar_gemini(prompt_sistema, prompt_usuario):
+    """Chama Gemini 1.5 Flash via REST puro — sem SDK, só urllib."""
+    import urllib.request, urllib.error
+
+    if len(prompt_usuario) > 8000:
+        prompt_usuario = prompt_usuario[:8000] + "\n...[dados truncados]"
+
+    # Gemini não tem campo system separado — une tudo em um prompt
+    prompt_completo = f"{prompt_sistema}\n\n{prompt_usuario}"
+
+    body = _json_mod.dumps({
+        "contents": [{"parts": [{"text": prompt_completo}]}],
+        "generationConfig": {"maxOutputTokens": 1024, "temperature": 0.4}
+    }, ensure_ascii=False).encode("utf-8")
+
+    chave = os.getenv("GOOGLE_API_KEY", "").strip()
+    # Testa v1 e v1beta com vários modelos — um deles vai funcionar
+    tentativas = [
+        ("v1beta","gemini-2.0-flash-lite"),   # confirmado funcionando
+        ("v1beta","gemini-2.0-flash"),
+        ("v1beta","gemini-1.5-flash-latest"),
+        ("v1",    "gemini-2.0-flash"),
+        ("v1",    "gemini-1.5-flash"),
+    ]
+    ultimo_erro = None
+    for versao, modelo in tentativas:
+        url = (
+            f"https://generativelanguage.googleapis.com/{versao}/models/"
+            f"{modelo}:generateContent?key={chave}"
+        )
+        try:
+            req = urllib.request.Request(
+                url, data=body,
+                headers={"Content-Type": "application/json"},
+                method="POST"
+            )
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                data = _json_mod.loads(resp.read().decode("utf-8"))
+            return data["candidates"][0]["content"]["parts"][0]["text"]
+        except urllib.error.HTTPError as e:
+            corpo = e.read().decode("utf-8", errors="replace")[:200]
+            ultimo_erro = f"HTTP_{e.code} ({versao}/{modelo}): {corpo}"
+            if e.code == 429:
+                raise Exception(f"429: {corpo}")  # propaga imediatamente — sem tentar outros
+            continue
+        except Exception as e:
+            ultimo_erro = str(e)
+            if "429" in str(e):
+                raise  # propaga o 429
+            continue
+    raise Exception(ultimo_erro or "Todos os modelos Gemini falharam")
+
+
+def executar_tarefa_financeira(pergunta_usuario):
+    """
+    Pipeline Multi-LLM com fallback automático:
+    - Modo completo: GPT-4o-mini processa → Claude Sonnet analisa
+    - Fallback:      GPT-4o-mini faz tudo sozinho (quando Claude indisponível)
+    - Reativa automaticamente quando Claude voltar a ter créditos
+    """
+    if not OPENAI_API_KEY and not ANTHROPIC_API_KEY:
+        return "⚠ Nenhuma chave de API encontrada. Configure ANTHROPIC_API_KEY e OPENAI_API_KEY no arquivo .env"
+
+    ctx = _montar_contexto_carteira()
+
+    PROMPT_CONSULTOR = (
+        "Você é um consultor financeiro especializado no mercado brasileiro. "
+        "Analise os dados da carteira do usuário e responda de forma clara, "
+        "objetiva e personalizada em português. "
+        "Seja direto, use dados concretos da carteira e dê recomendações práticas. "
+        "Não invente dados — use apenas o que foi fornecido."
+    )
+
+    # ── Etapa 1: GPT-4o-mini processa os dados brutos ──
+    dados_processados = None
+    erro_gpt = None
+    if OPENAI_API_KEY:
+        try:
+            sys_gpt = (
+                "Você é um processador de dados financeiros. "
+                "Recebe dados de carteira em JSON e uma pergunta do usuário. "
+                "Retorne APENAS um JSON válido com os campos: "
+                "resumo_numerico (dict com métricas calculadas), "
+                "alertas (list de strings), "
+                "contexto_pergunta (string com dados relevantes para a pergunta)."
+            )
+            usr_gpt = (
+                f"Dados da carteira:\n{_json_mod.dumps(ctx, ensure_ascii=False, indent=2)}\n\n"
+                f"Pergunta do usuário: {pergunta_usuario}"
+            )
+            resposta_gpt = _chamar_gpt(sys_gpt, usr_gpt)
+            resposta_gpt_clean = resposta_gpt.strip()
+            if resposta_gpt_clean.startswith("```"):
+                resposta_gpt_clean = resposta_gpt_clean.split("\n", 1)[1].rsplit("```", 1)[0]
+            dados_processados = _json_mod.loads(resposta_gpt_clean)
+        except Exception as e:
+            erro_gpt = str(e)
+            dados_processados = {"dados_brutos": ctx}
+    else:
+        dados_processados = {"dados_brutos": ctx}
+
+    # ── Etapa 2: tenta Claude Sonnet ──
+    if ANTHROPIC_API_KEY:
+        sys_claude = PROMPT_CONSULTOR
+        usr_claude = (
+            f"Dados processados da carteira:\n{_json_mod.dumps(dados_processados, ensure_ascii=False, indent=2)}\n\n"
+            f"Pergunta do investidor: {pergunta_usuario}"
+        )
+        try:
+            resposta = _chamar_claude(sys_claude, usr_claude)
+            return resposta  # pipeline completo funcionou
+        except Exception as e:
+            erro_str = str(e)
+            # Verifica se é erro de saldo — faz fallback silencioso para GPT
+            eh_saldo = any(k in erro_str for k in ["credit", "billing", "balance", "quota", "429", "low"])
+            if not eh_saldo:
+                return f"⚠ Erro ao chamar Claude: {erro_str}"
+            # Saldo insuficiente — continua para GPT
+
+    # ── Fallback 1: GPT-4o-mini sozinho ──
+    if OPENAI_API_KEY:
+        try:
+            usr_gpt_final = (
+                f"Dados da carteira:\n{_json_mod.dumps(ctx, ensure_ascii=False, indent=2)}\n\n"
+                f"Pergunta do investidor: {pergunta_usuario}"
+            )
+            resposta = _chamar_gpt(PROMPT_CONSULTOR, usr_gpt_final)
+            return f"[GPT-4o-mini] {resposta}"
+        except Exception as e:
+            erro_gpt2 = str(e)
+            eh_saldo_gpt = any(k in erro_gpt2 for k in ["credit", "billing", "quota", "429", "insufficient"])
+            if not eh_saldo_gpt:
+                return f"⚠ Erro no GPT: {erro_gpt2}"
+            # Saldo insuficiente no GPT — tenta Gemini
+
+    # ── Fallback 2: Gemini 1.5 Flash (gratuito) ──
+    if GOOGLE_API_KEY:
+        # Garante que há dados válidos antes de enviar
+        ctx_limpo = {k: v for k, v in ctx.items() if v not in [None, [], {}]}
+        if not ctx_limpo:
+            ctx_limpo = {"aviso": "Carteira vazia — responda de forma genérica sobre investimentos."}
+        try:
+            usr_gemini = (
+                f"Dados da carteira:\n{_json_mod.dumps(ctx_limpo, ensure_ascii=False, indent=2)}\n\n"
+                f"Pergunta do investidor: {pergunta_usuario}"
+            )
+            resposta = _chamar_gemini(PROMPT_CONSULTOR, usr_gemini)
+            return f"[Gemini 1.5 Flash] {resposta}"
+        except Exception as e:
+            erro_str = str(e)
+            print(f"[Gemini] Erro detalhado: {erro_str}")
+            if "429" in erro_str or "quota" in erro_str.lower():
+                return "⏳ Limite do Gemini atingido (15 req/min gratuitas). Aguarde 1 minuto e tente novamente."
+            return f"⚠ Gemini indisponível: {erro_str[:150]}"
+
+    return "⚠ Nenhuma IA disponivel. Claude: console.anthropic.com | GPT: platform.openai.com | Gemini: verifique GOOGLE_API_KEY no .env"
 
 root.mainloop()
