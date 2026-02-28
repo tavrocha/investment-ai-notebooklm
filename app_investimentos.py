@@ -644,8 +644,6 @@ def exportar_pdf():
         header = ["Ativo", "Retorno %", "Volatil. %", "Risco", "Máximo", "Mínimo"]
         rows   = [header]
         for a in analises:
-            s = (dados["Close"] if len(selecionados)==1
-                 else dados["Close"][ativo]).dropna()
             try:
                 serie  = (dados["Close"] if len(selecionados)==1
                           else dados["Close"][a["ticker"]]).dropna()
@@ -1070,7 +1068,7 @@ def atualizar_cotacoes():
     for _, lbl_val, lbl_var in [(k, v[0], v[1]) for k, v in _labels_cotacao.items()]:
         lbl_val.config(text="...")
     threading.Thread(target=_buscar_cotacoes, daemon=True).start()
-    root.after(60_000, atualizar_cotacoes)
+    root.after(300_000, atualizar_cotacoes)
 
 # ==============================
 # SIMULADOR CDB
@@ -1534,13 +1532,28 @@ CARTEIRA_JSON = os.path.join(os.path.dirname(os.path.abspath(__file__)), "cartei
 
 # ── 1. Persistência JSON ──
 def _carregar_carteira():
+    """Carrega carteira do JSON com validação de campos."""
     if os.path.exists(CARTEIRA_JSON):
         try:
             with open(CARTEIRA_JSON, encoding="utf-8") as f:
-                return json.load(f)
+                dados = json.load(f)
+            if not isinstance(dados, dict):
+                return {}
+            validos = {}
+            for ticker, pos in dados.items():
+                if all(k in pos for k in ("qtd","preco_medio","data_compra")):
+                    pos["qtd"]         = float(pos["qtd"])
+                    pos["preco_medio"] = float(pos["preco_medio"])
+                    validos[ticker]    = pos
+            return validos
         except Exception:
-            pass
-    return {}   # {ticker: {qtd, preco_medio, data_compra}}
+            try:
+                import shutil
+                shutil.copy(CARTEIRA_JSON, CARTEIRA_JSON + ".bak")
+            except Exception:
+                pass
+            return {}
+    return {}
 
 def _salvar_carteira(carteira):
     with open(CARTEIRA_JSON, "w", encoding="utf-8") as f:
@@ -1556,12 +1569,30 @@ _carteira = _carregar_carteira()
 CDB_JSON = os.path.join(os.path.dirname(os.path.abspath(__file__)), "carteira_cdbs.json")
 
 def _carregar_cdbs():
+    """Carrega CDBs do JSON com validação de campos."""
     if os.path.exists(CDB_JSON):
         try:
             with open(CDB_JSON, encoding="utf-8") as f:
-                return json.load(f)
+                dados = json.load(f)
+            # Valida que é lista e cada item tem os campos necessários
+            if not isinstance(dados, list):
+                return []
+            validos = []
+            for item in dados:
+                if all(k in item for k in ("nome","valor","pct_cdi","data")):
+                    # Garante tipos corretos
+                    item["valor"]   = float(item["valor"])
+                    item["pct_cdi"] = float(item["pct_cdi"])
+                    validos.append(item)
+            return validos
         except Exception:
-            pass
+            # JSON corrompido — faz backup e começa do zero
+            try:
+                import shutil
+                shutil.copy(CDB_JSON, CDB_JSON + ".bak")
+            except Exception:
+                pass
+            return []
     return []   # lista de dicts: {nome, valor, pct_cdi, data}
 
 def _salvar_cdbs(cdbs):
@@ -1690,6 +1721,357 @@ def _renderizar_cdbs():
         tk.Label(tbl, text=val, bg="#0d1f2d", fg=fg,
                  font=("Arial", 8, "bold"), width=widths[c],
                  anchor="center").grid(row=tot_row, column=c, padx=1, pady=3, sticky="ew")
+
+
+# ======================================================
+# ETAPA 5 — Tópicos 6 a 10
+# ======================================================
+
+# ── 6. Indicadores de Risco Avançados ──
+def _calcular_beta(serie_ativo, serie_ibov):
+    try:
+        import pandas as pd
+        ret_a = serie_ativo.pct_change().dropna()
+        ret_b = serie_ibov.pct_change().dropna()
+        df = pd.concat([ret_a, ret_b], axis=1).dropna()
+        if len(df) < 10: return None
+        cov = df.iloc[:,0].cov(df.iloc[:,1])
+        var = df.iloc[:,1].var()
+        return round(cov/var, 2) if var != 0 else None
+    except: return None
+
+def _calcular_sharpe(serie):
+    try:
+        ret_d = serie.pct_change().dropna()
+        ret_a = float(ret_d.mean() * 252)
+        vol_a = float(ret_d.std() * (252**0.5))
+        if vol_a == 0: return None
+        return round((ret_a - CDI_ANUAL) / vol_a, 2)
+    except: return None
+
+def _calcular_drawdown_max(serie):
+    try:
+        pico = serie.cummax()
+        dd   = (serie - pico) / pico * 100
+        return round(float(dd.min()), 2)
+    except: return None
+
+def _buscar_ibov_para_carteira(start, end):
+    try:
+        d = yf.download("^BVSP", start=start, end=end,
+                        auto_adjust=True, progress=False)
+        return d["Close"].dropna() if not d.empty else None
+    except: return None
+
+def _calcular_indicadores_avancados_carteira(carteira, precos):
+    """Calcula Beta, Sharpe e Drawdown para cada ativo da carteira."""
+    if not carteira: return {}
+    datas = []
+    for pos in carteira.values():
+        try: datas.append(datetime.strptime(pos["data_compra"], "%d/%m/%Y"))
+        except: pass
+    if not datas: return {}
+    start = min(datas).strftime("%Y-%m-%d")
+    end   = datetime.now().strftime("%Y-%m-%d")
+    tickers = list(carteira.keys())
+    try:
+        dados = yf.download(tickers, start=start, end=end,
+                            auto_adjust=True, progress=False)
+        if dados.empty: return {}
+    except: return {}
+    serie_ibov = _buscar_ibov_para_carteira(start, end)
+    result = {}
+    for ticker in tickers:
+        try:
+            serie = (dados["Close"] if len(tickers)==1
+                     else dados["Close"][ticker]).dropna()
+            result[ticker] = {
+                "beta":     _calcular_beta(serie, serie_ibov) if serie_ibov is not None else None,
+                "sharpe":   _calcular_sharpe(serie),
+                "drawdown": _calcular_drawdown_max(serie),
+            }
+        except: pass
+    return result
+
+def _grafico_evolucao_com_dados(dados, carteira, frame_pai):
+    """Plota evolução do patrimônio com dados já baixados."""
+    for w in frame_pai.winfo_children(): w.destroy()
+    tickers = list(carteira.keys())
+    try:
+        import pandas as pd
+        patrimonio_total = pd.Series(dtype=float)
+        for ticker, pos in carteira.items():
+            try:
+                serie = (dados["Close"] if len(tickers)==1
+                         else dados["Close"][ticker]).dropna()
+                patrimonio_total = patrimonio_total.add(serie * float(pos["qtd"]), fill_value=0)
+            except: pass
+        if patrimonio_total.empty:
+            return
+        fig = plt.figure(figsize=(11, 3.0)); fig.patch.set_facecolor("#0a0a14")
+        ax  = fig.add_axes([0.07, 0.20, 0.88, 0.70]); ax.set_facecolor("#0a0a14")
+        ax.fill_between(patrimonio_total.index, patrimonio_total.values, alpha=0.2, color=ACCENT)
+        ax.plot(patrimonio_total.index, patrimonio_total.values, color=ACCENT, linewidth=2)
+        ax.set_title("Evolução do Patrimônio", color=TXT, fontsize=10, fontweight="bold")
+        ax.yaxis.set_major_formatter(FuncFormatter(lambda x,_: f"R$ {x:,.0f}"))
+        import matplotlib.dates as md3
+        ax.xaxis.set_major_locator(md3.MonthLocator(interval=1))
+        ax.xaxis.set_major_formatter(md3.DateFormatter("%b/%Y"))
+        ax.tick_params(axis="x", colors="#FFF", rotation=30, labelsize=7)
+        ax.tick_params(axis="y", colors="#FFF")
+        for spine in ax.spines.values(): spine.set_color("#333")
+        canvas = FigureCanvasTkAgg(fig, master=frame_pai)
+        canvas.draw(); canvas.get_tk_widget().pack(fill="both", expand=True)
+    except Exception as e:
+        tk.Label(frame_pai, text=f"Erro no gráfico: {e}", bg="#0a0a14",
+                 fg="#FF5252", font=("Arial",8)).pack()
+
+def _montar_tabela_risco(carteira, frame_pai):
+    """Renderiza tabela de indicadores de risco avançados (em thread)."""
+    for w in frame_pai.winfo_children(): w.destroy()
+    if not carteira:
+        tk.Label(frame_pai, text="Adicione ativos para ver indicadores de risco.",
+                 bg="#0a0a14", fg="#555", font=("Arial", 8, "italic"), pady=8).pack()
+        return
+    tk.Label(frame_pai, text="⏳ Calculando Beta, Sharpe e Drawdown...",
+             bg="#0a0a14", fg=ACCENT, font=("Arial", 8), pady=6).pack()
+    def _calc():
+        try:
+            ind = _calcular_indicadores_avancados_carteira(carteira, {})
+            root.after(0, lambda: _renderizar_tabela_risco(ind, frame_pai))
+        except Exception as e:
+            root.after(0, lambda: [w.destroy() for w in frame_pai.winfo_children()] or
+                       tk.Label(frame_pai, text=f"Erro ao calcular indicadores.",
+                                bg="#0a0a14", fg="#FF5252", font=("Arial",8)).pack())
+    threading.Thread(target=_calc, daemon=True).start()
+
+def _renderizar_tabela_risco(indicadores, frame_pai):
+    for w in frame_pai.winfo_children(): w.destroy()
+    if not indicadores:
+        tk.Label(frame_pai, text="Não foi possível calcular indicadores.",
+                 bg="#0a0a14", fg="#555", font=("Arial", 8, "italic"), pady=8).pack()
+        return
+    CAB_BG = "#0d1a24"
+    cols   = ["Ativo", "Beta", "Sharpe", "Drawdown Máx."]
+    widths = [10, 8, 8, 14]
+    tbl = tk.Frame(frame_pai, bg=CAB_BG); tbl.pack(fill="x", padx=6)
+    for c,(col,w) in enumerate(zip(cols,widths)):
+        tk.Label(tbl, text=col, bg=CAB_BG, fg="#EA80FC",
+                 font=("Arial",8,"bold"), width=w,
+                 anchor="center").grid(row=0,column=c,padx=1,pady=3,sticky="ew")
+    tk.Frame(tbl, bg="#2a1a2a", height=1).grid(row=1,column=0,columnspan=4,sticky="ew")
+    for idx,(ticker,ind) in enumerate(indicadores.items()):
+        row_bg = "#0a0a14" if idx%2==0 else "#0d0d1a"
+        ri     = idx+2
+        beta_s = f"{ind['beta']:.2f}"  if ind['beta']    is not None else "N/D"
+        shar_s = f"{ind['sharpe']:.2f}" if ind['sharpe'] is not None else "N/D"
+        dd_s   = f"{ind['drawdown']:.1f}%" if ind['drawdown'] is not None else "N/D"
+        cor_beta  = "#00E676" if ind['beta'] is not None and ind['beta']<1 else "#FF5252" if ind['beta'] is not None else "#888"
+        cor_sharp = "#00E676" if ind['sharpe'] is not None and ind['sharpe']>0 else "#FF5252" if ind['sharpe'] is not None else "#888"
+        cor_dd    = "#FFD600" if ind['drawdown'] is not None and ind['drawdown']>-15 else "#FF5252" if ind['drawdown'] is not None else "#888"
+        dados_row = [(nome_exibicao(ticker),"#cccccc"),(beta_s,cor_beta),(shar_s,cor_sharp),(dd_s,cor_dd)]
+        for c,(val,fg) in enumerate(dados_row):
+            tk.Label(tbl,text=val,bg=row_bg,fg=fg,
+                     font=("Arial",8),width=widths[c],
+                     anchor="center").grid(row=ri,column=c,padx=1,pady=2,sticky="ew")
+
+    # Legenda
+    leg = tk.Frame(frame_pai, bg="#0a0a14"); leg.pack(fill="x", padx=8, pady=4)
+    tk.Label(leg, text="Beta<1 = menos volátil que o mercado  |  Sharpe>0 = retorno acima do risco  |  Drawdown = maior queda do pico",
+             bg="#0a0a14", fg="#555555", font=("Arial", 7), anchor="w").pack(fill="x")
+
+# ── 7. Comparativo com Benchmarks ──
+def _montar_grafico_benchmark(carteira, frame_pai):
+    """Gráfico em Base 100 comparando carteira vs Ibovespa vs CDI."""
+    for w in frame_pai.winfo_children(): w.destroy()
+    if not carteira:
+        tk.Label(frame_pai, text="Adicione ações para ver a comparação com benchmarks.",
+                 bg="#0a0a14", fg="#555", font=("Arial", 8, "italic"), pady=8).pack()
+        return
+    tk.Label(frame_pai, text="⏳ Buscando dados do Ibovespa e CDI...",
+             bg="#0a0a14", fg=ACCENT, font=("Arial",8), pady=6).pack()
+    def _buscar():
+        try:
+            datas = []
+            for pos in carteira.values():
+                try: datas.append(datetime.strptime(pos["data_compra"],"%d/%m/%Y"))
+                except: pass
+            if not datas: return
+            start   = min(datas).strftime("%Y-%m-%d")
+            end     = datetime.now().strftime("%Y-%m-%d")
+            tickers = list(carteira.keys())
+            dados   = yf.download(tickers, start=start, end=end,
+                                  auto_adjust=True, progress=False)
+            ibov    = yf.download("^BVSP", start=start, end=end,
+                                  auto_adjust=True, progress=False)
+            root.after(0, lambda: _renderizar_benchmark(dados, ibov, carteira, frame_pai, start, end))
+        except Exception as e:
+            root.after(0, lambda: [w.destroy() for w in frame_pai.winfo_children()] or
+                       tk.Label(frame_pai, text="Erro ao buscar benchmarks.",
+                                bg="#0a0a14", fg="#FF5252", font=("Arial",8)).pack())
+    threading.Thread(target=_buscar, daemon=True).start()
+
+def _renderizar_benchmark(dados, ibov, carteira, frame_pai, start, end):
+    import pandas as pd, numpy as np
+    for w in frame_pai.winfo_children(): w.destroy()
+    fig = plt.figure(figsize=(11, 3.0)); fig.patch.set_facecolor("#0a0a14")
+    ax  = fig.add_axes([0.07, 0.20, 0.88, 0.70]); ax.set_facecolor("#0a0a14")
+    tickers = list(carteira.keys())
+    # Carteira ponderada por custo
+    try:
+        total_custo = sum(float(p["qtd"])*float(p["preco_medio"]) for p in carteira.values())
+        cart_serie  = None
+        for ticker, pos in carteira.items():
+            serie = (dados["Close"] if len(tickers)==1 else dados["Close"][ticker]).dropna()
+            peso  = (float(pos["qtd"])*float(pos["preco_medio"]))/total_custo if total_custo>0 else 1/len(tickers)
+            base  = (serie/serie.iloc[0])*100*peso
+            cart_serie = base if cart_serie is None else cart_serie.add(base, fill_value=0)
+        if cart_serie is not None:
+            ax.plot(cart_serie.index, cart_serie.values, color=ACCENT, linewidth=2.5, label="Minha Carteira")
+    except: pass
+    # Ibovespa
+    if not ibov.empty:
+        s = ibov["Close"].dropna(); s = (s/s.iloc[0])*100
+        ax.plot(s.index, s.values, color="#888888", linewidth=1.5, linestyle="--", label="IBOV")
+    # CDI sintético
+    try:
+        datas_cdi = pd.date_range(start, end, freq="B")
+        td = (1+CDI_ANUAL)**(1/252)-1
+        cdi_vals = 100*np.cumprod([1+td]*len(datas_cdi))
+        ax.plot(datas_cdi, cdi_vals, color="#FFD600", linewidth=1.2, linestyle=":", label="CDI")
+    except: pass
+    ax.set_title("Carteira vs Benchmarks (Base 100)", color=TXT, fontsize=10, fontweight="bold")
+    ax.axhline(100, color="#333", linewidth=0.7, linestyle="-")
+    ax.yaxis.set_major_formatter(FuncFormatter(lambda x,_: f"{x:.0f}"))
+    import matplotlib.dates as md2
+    ax.xaxis.set_major_locator(md2.MonthLocator(interval=1))
+    ax.xaxis.set_major_formatter(md2.DateFormatter("%b/%Y"))
+    ax.tick_params(axis="x", colors="#FFF", rotation=30, labelsize=7)
+    ax.tick_params(axis="y", colors="#FFF")
+    for spine in ax.spines.values(): spine.set_color("#333")
+    leg = ax.legend(loc="upper left", frameon=False, fontsize=8)
+    for t in leg.get_texts(): t.set_color("#FFF")
+    canvas = FigureCanvasTkAgg(fig, master=frame_pai)
+    canvas.draw(); canvas.get_tk_widget().pack(fill="both", expand=True)
+
+# ── 8. Alertas Automáticos ──
+def _gerar_alertas_carteira(rows):
+    """Gera lista de alertas baseados na posição atual da carteira."""
+    alertas = []
+    for r in rows:
+        # Queda acentuada
+        if r["lucro_pct"] <= -15:
+            alertas.append(("🔴", f"{r['nome']} caiu {r['lucro_pct']:.1f}% desde sua compra — avalie sua posição.", "#FF5252"))
+        elif r["lucro_pct"] <= -8:
+            alertas.append(("🟡", f"{r['nome']} está {r['lucro_pct']:.1f}% abaixo do preço médio.", "#FFD600"))
+        # Alta expressiva
+        if r["lucro_pct"] >= 30:
+            alertas.append(("🟢", f"{r['nome']} valorizou {r['lucro_pct']:.1f}% — considere realizar parte do lucro.", "#00E676"))
+        # Comparação com CDI
+        try:
+            cdi = _cdi_desde_compra(r["data_compra"])
+            if cdi and r["lucro_pct"] < cdi:
+                diff = cdi - r["lucro_pct"]
+                alertas.append(("💛", f"{r['nome']} está {diff:.1f}% abaixo do CDI no mesmo período.", "#FFD600"))
+        except: pass
+    # Concentração setorial
+    setores = {}
+    for r in rows:
+        s = SETORES.get(r["ticker"], "Outros")
+        setores[s] = setores.get(s,[]) + [r["nome"]]
+    for setor, nomes in setores.items():
+        if len(nomes) >= 2:
+            alertas.append(("⚡", f"Concentração em {setor}: {', '.join(nomes)}. Considere diversificar.", "#FF9100"))
+    if not alertas:
+        alertas.append(("✅", "Nenhum alerta no momento. Carteira dentro dos parâmetros normais.", "#00E676"))
+    return alertas
+
+def _montar_alertas(rows, frame_pai):
+    for w in frame_pai.winfo_children(): w.destroy()
+    if not rows:
+        tk.Label(frame_pai, text="Adicione ações à carteira para ver os alertas.",
+                 bg="#0a0a14", fg="#555555", font=("Arial", 8, "italic"), pady=8).pack()
+        return
+    alertas = _gerar_alertas_carteira(rows)
+    for icone, texto, cor in alertas:
+        row = tk.Frame(frame_pai, bg="#0a0a14"); row.pack(fill="x", padx=8, pady=2)
+        tk.Label(row, text=icone, bg="#0a0a14", font=("Arial",10), width=2).pack(side="left")
+        tk.Label(row, text=texto, bg="#0a0a14", fg=cor,
+                 font=("Arial",8), anchor="w", wraplength=900).pack(side="left", fill="x", expand=True)
+
+# ── 9. Score de Diversificação ──
+def _calcular_score_diversificacao(carteira):
+    """Nota 0–10 baseada em qtd de ativos, setores e concentração."""
+    if not carteira: return 0.0, "Carteira vazia."
+    n_ativos  = len(carteira)
+    setores   = set(SETORES.get(t,"Outros") for t in carteira)
+    n_setores = len(setores)
+    # Concentração: % do maior ativo pelo custo
+    custos = {t: float(p["qtd"])*float(p["preco_medio"]) for t,p in carteira.items()}
+    total  = sum(custos.values())
+    maior_pct = max(custos.values())/total*100 if total>0 else 100
+    # Score
+    score_ativos  = min(10, n_ativos * 1.2)
+    score_setores = min(10, n_setores * 2.0)
+    score_conc    = max(0, 10 - (maior_pct - 20) * 0.2) if maior_pct > 20 else 10
+    score = round((score_ativos*0.3 + score_setores*0.4 + score_conc*0.3), 1)
+    if score >= 8:   msg = "✅ Carteira bem diversificada!"
+    elif score >= 6: msg = "⚠ Diversificação razoável — considere adicionar mais setores."
+    elif score >= 4: msg = "🔶 Diversificação baixa — carteira concentrada."
+    else:            msg = "🔴 Carteira muito concentrada — alto risco não sistemático."
+    return score, msg
+
+def _montar_score_div(carteira, frame_pai):
+    for w in frame_pai.winfo_children(): w.destroy()
+    score, msg = _calcular_score_diversificacao(carteira)
+    cor = "#00E676" if score>=8 else "#FFD600" if score>=5 else "#FF5252"
+    # Linha com barra
+    row = tk.Frame(frame_pai, bg="#0a0a14"); row.pack(fill="x", padx=10, pady=6)
+    tk.Label(row, text="Score de Diversificação:", bg="#0a0a14", fg="#aaaaaa",
+             font=("Arial",9,"bold")).pack(side="left")
+    BAR_W = 160
+    c_bar = tk.Canvas(row, width=BAR_W, height=12, bg="#0a0a14", highlightthickness=0)
+    c_bar.pack(side="left", padx=8)
+    c_bar.create_rectangle(0,0,BAR_W,12,fill="#1a1a2a",outline="")
+    c_bar.create_rectangle(0,0,int(score/10*BAR_W),12,fill=cor,outline="")
+    tk.Label(row, text=f"{score}/10", bg="#0a0a14", fg=cor,
+             font=("Arial",9,"bold")).pack(side="left", padx=4)
+    tk.Label(frame_pai, text=msg, bg="#0a0a14", fg=cor,
+             font=("Arial",8), anchor="w", padx=10).pack(fill="x")
+
+# ── 10. Resumo Executivo ──
+def _gerar_resumo_executivo(rows, carteira):
+    """Gera parágrafo descritivo do estado atual da carteira."""
+    if not rows: return "Adicione ativos à carteira para ver o resumo executivo."
+    total_custo  = sum(r["custo"]      for r in rows)
+    total_patrim = sum(r["patrimonio"] for r in rows)
+    total_lucro  = sum(r["lucro_rs"]   for r in rows)
+    total_pct    = (total_lucro/total_custo*100) if total_custo>0 else 0
+    melhor = max(rows, key=lambda r: r["lucro_pct"])
+    pior   = min(rows, key=lambda r: r["lucro_pct"])
+    score_div, _ = _calcular_score_diversificacao(carteira)
+    nivel_div = "bem diversificada" if score_div>=8 else "moderadamente diversificada" if score_div>=5 else "concentrada"
+    sinal = "positivo" if total_lucro>=0 else "negativo"
+    resumo = (
+        f"Sua carteira é composta por {len(rows)} ativo(s), com custo total de "
+        f"R$ {total_custo:,.2f} e patrimônio atual de R$ {total_patrim:,.2f}. "
+        f"O resultado acumulado é {sinal}: R$ {total_lucro:+,.2f} ({total_pct:+.2f}%). "
+        f"O ativo com melhor desempenho é {melhor['nome']} ({melhor['lucro_pct']:+.2f}%) "
+        f"e o que mais preocupa é {pior['nome']} ({pior['lucro_pct']:+.2f}%). "
+        f"A carteira está {nivel_div} (score {score_div}/10)."
+    )
+    return resumo
+
+def _montar_resumo_executivo(rows, carteira, frame_pai):
+    for w in frame_pai.winfo_children(): w.destroy()
+    if not rows:
+        tk.Label(frame_pai, text="Adicione ativos à carteira para ver o resumo executivo.",
+                 bg="#0a0a14", fg="#555", font=("Arial", 8, "italic"), pady=8).pack()
+        return
+    texto = _gerar_resumo_executivo(rows, carteira)
+    tk.Label(frame_pai, text=texto, bg="#0a0a14", fg="#cccccc",
+             font=("Arial", 9), anchor="w", justify="left",
+             wraplength=1100, padx=12, pady=10).pack(fill="x")
 
 def _buscar_precos_carteira(tickers):
     """Retorna dict {ticker: preco_atual} para todos os ativos da carteira."""
@@ -1859,12 +2241,106 @@ def _remover_posicao(ticker):
         _atualizar_carteira_ui()
 
 def _atualizar_carteira_ui():
-    """Rebusca preços e re-renderiza toda a UI da carteira."""
-    lbl_cart_status.config(text="Buscando preços...", fg="#aaaaaa")
-    def _buscar():
-        precos = _buscar_precos_carteira(list(_carteira.keys()))
-        root.after(0, lambda: _renderizar_carteira(precos))
-    threading.Thread(target=_buscar, daemon=True).start()
+    """Busca TODOS os dados em uma thread e renderiza tudo de uma vez."""
+    lbl_cart_status.config(text="⏳ Buscando dados...", fg="#aaaaaa")
+    btn_atualizar_cart.config(state="disabled", text="Carregando...")
+
+    def _buscar_tudo():
+        resultado = {"precos": {}, "ibov": None, "dados_hist": None,
+                     "indicadores": {}, "erro": None}
+        try:
+            tickers = list(_carteira.keys())
+            if not tickers:
+                root.after(0, lambda: _aplicar_resultados(resultado))
+                return
+
+            # 1. Preços atuais
+            resultado["precos"] = _buscar_precos_carteira(tickers)
+
+            # 2. Dados históricos para gráficos e indicadores
+            datas = []
+            for pos in _carteira.values():
+                try: datas.append(datetime.strptime(pos["data_compra"], "%d/%m/%Y"))
+                except: pass
+
+            if datas:
+                start = min(datas).strftime("%Y-%m-%d")
+                end   = datetime.now().strftime("%Y-%m-%d")
+                try:
+                    resultado["dados_hist"] = yf.download(
+                        tickers, start=start, end=end,
+                        auto_adjust=True, progress=False)
+                except: pass
+                try:
+                    resultado["ibov"] = yf.download(
+                        "^BVSP", start=start, end=end,
+                        auto_adjust=True, progress=False)
+                except: pass
+                # 3. Indicadores de risco
+                try:
+                    ind = {}
+                    serie_ibov = resultado["ibov"]["Close"].dropna() if resultado["ibov"] is not None and not resultado["ibov"].empty else None
+                    dados_h = resultado["dados_hist"]
+                    for ticker in tickers:
+                        try:
+                            s = (dados_h["Close"] if len(tickers)==1
+                                 else dados_h["Close"][ticker]).dropna()
+                            ind[ticker] = {
+                                "beta":     _calcular_beta(s, serie_ibov) if serie_ibov is not None else None,
+                                "sharpe":   _calcular_sharpe(s),
+                                "drawdown": _calcular_drawdown_max(s),
+                            }
+                        except: pass
+                    resultado["indicadores"] = ind
+                except: pass
+
+        except Exception as e:
+            resultado["erro"] = str(e)
+
+        root.after(0, lambda: _aplicar_resultados(resultado))
+
+    threading.Thread(target=_buscar_tudo, daemon=True).start()
+
+def _aplicar_resultados(resultado):
+    """Chamada na thread principal com todos os dados prontos."""
+    btn_atualizar_cart.config(state="normal", text="↻ Atualizar")
+
+    precos      = resultado["precos"]
+    dados_hist  = resultado["dados_hist"]
+    ibov        = resultado["ibov"]
+    indicadores = resultado["indicadores"]
+
+    # Renderiza tabela P&L
+    _renderizar_carteira(precos)
+
+    rows = _calcular_pl(_carteira, precos)
+    if not rows:
+        return
+
+    # Alertas (síncrono, rápido)
+    _montar_alertas(rows, frame_cart_alertas)
+
+    # Score diversificação (síncrono, rápido)
+    _montar_score_div(_carteira, frame_cart_score)
+
+    # Resumo executivo (síncrono, rápido)
+    _montar_resumo_executivo(rows, _carteira, frame_cart_resumo)
+
+    # Gráfico evolução
+    if dados_hist is not None and not dados_hist.empty:
+        _grafico_evolucao_com_dados(dados_hist, _carteira, frame_cart_grafico)
+
+    # Gráfico benchmark
+    if dados_hist is not None and not dados_hist.empty:
+        _renderizar_benchmark(dados_hist, ibov, _carteira, frame_cart_benchmark,
+                              min([datetime.strptime(p["data_compra"],"%d/%m/%Y") for p in _carteira.values()]).strftime("%Y-%m-%d"),
+                              datetime.now().strftime("%Y-%m-%d"))
+
+    # Indicadores de risco
+    if indicadores:
+        _renderizar_tabela_risco(indicadores, frame_cart_risco)
+
+    lbl_cart_status.config(text=f"✔ Carteira atualizada — {len(rows)} ativo(s)", fg="#00E676")
 
 def _renderizar_carteira(precos):
     """Renderiza tabela P&L + totais + gráfico."""
@@ -1874,10 +2350,10 @@ def _renderizar_carteira(precos):
     rows = _calcular_pl(_carteira, precos)
 
     if not rows:
+        for w in frame_cart_tabela.winfo_children(): w.destroy()
         tk.Label(frame_cart_tabela,
-                 text="Nenhum ativo na carteira. Adicione acima.",
-                 bg="#0a0a14", fg="#555", font=("Arial", 9, "italic"), pady=16).pack()
-        _grafico_evolucao_carteira(_carteira, frame_cart_grafico)
+                 text="Nenhum ativo adicionado. Use o formulário acima para adicionar ações.",
+                 bg="#0a0a14", fg="#555555", font=("Arial", 9, "italic"), pady=16).pack()
         lbl_cart_status.config(text="", fg="#aaaaaa")
         return
 
@@ -1952,10 +2428,7 @@ def _renderizar_carteira(precos):
                  font=("Arial",8,"bold"), width=widths[c],
                  anchor="center").grid(row=tot_row,column=c,padx=1,pady=3,sticky="ew")
 
-    lbl_cart_status.config(text=f"Carteira atualizada — {len(rows)} ativo(s)", fg="#00E676")
-
-    # Gráfico evolução
-    _grafico_evolucao_carteira(_carteira, frame_cart_grafico)
+    lbl_cart_status.config(text=f"⏳ Calculando seções avançadas...", fg="#aaaaaa")
 
 # ======================================================
 # UI — CARD CARTEIRA PESSOAL (Etapa 5)
@@ -1974,9 +2447,10 @@ cab_cart = tk.Frame(frame_cart, bg="#050510")
 cab_cart.pack(fill="x")
 tk.Label(cab_cart, text="💼  Carteira Pessoal", bg="#050510", fg=CART_ACC,
          font=("Arial", 11, "bold"), pady=6).pack(side="left", padx=12)
-tk.Button(cab_cart, text="↻ Atualizar", bg=BTN, fg=CART_ACC,
+btn_atualizar_cart = tk.Button(cab_cart, text="↻ Atualizar", bg=BTN, fg=CART_ACC,
           font=("Arial", 8, "bold"), relief="flat", cursor="hand2",
-          command=_atualizar_carteira_ui).pack(side="right", padx=10)
+          command=_atualizar_carteira_ui)
+btn_atualizar_cart.pack(side="right", padx=10)
 
 # Formulário de adição
 frame_cart_form = tk.Frame(frame_cart, bg=CART_BG)
@@ -2093,8 +2567,60 @@ frame_cdb_cart_tabela = tk.Frame(frame_cart, bg=CART_BG)
 frame_cdb_cart_tabela.pack(fill="x", padx=4, pady=(0, 10))
 
 # Gráfico evolução
-frame_cart_grafico = tk.Frame(frame_cart, bg=CART_BG, height=200)
-frame_cart_grafico.pack(fill="x", padx=4, pady=(0,8))
+frame_cart_grafico = tk.Frame(frame_cart, bg=CART_BG)
+frame_cart_grafico.pack(fill="x", padx=4, pady=(0,4))
+
+# 7. Gráfico benchmark
+tk.Frame(frame_cart, bg="#1a1a2a", height=1).pack(fill="x", padx=10, pady=(4,0))
+tk.Label(frame_cart, text="📈  Carteira vs Benchmarks", bg="#050510", fg="#B2FF59",
+         font=("Arial", 9, "bold"), pady=4).pack(anchor="w", padx=12)
+frame_cart_benchmark = tk.Frame(frame_cart, bg=CART_BG)
+frame_cart_benchmark.pack(fill="x", padx=4, pady=(0,4))
+
+# 8. Alertas
+tk.Frame(frame_cart, bg="#1a1a2a", height=1).pack(fill="x", padx=10, pady=(4,0))
+tk.Label(frame_cart, text="🔔  Alertas Automáticos", bg="#050510", fg="#FF9100",
+         font=("Arial", 9, "bold"), pady=4).pack(anchor="w", padx=12)
+frame_cart_alertas = tk.Frame(frame_cart, bg="#0a0a14")
+frame_cart_alertas.pack(fill="x", padx=4, pady=(0,4))
+
+# 9. Score diversificação
+tk.Frame(frame_cart, bg="#1a1a2a", height=1).pack(fill="x", padx=10, pady=(4,0))
+tk.Label(frame_cart, text="🎯  Score de Diversificação", bg="#050510", fg="#00E676",
+         font=("Arial", 9, "bold"), pady=4).pack(anchor="w", padx=12)
+frame_cart_score = tk.Frame(frame_cart, bg="#0a0a14")
+frame_cart_score.pack(fill="x", padx=4, pady=(0,4))
+
+# 6. Indicadores de risco avançados
+tk.Frame(frame_cart, bg="#1a1a2a", height=1).pack(fill="x", padx=10, pady=(4,0))
+tk.Label(frame_cart, text="📊  Indicadores de Risco Avançados", bg="#050510", fg="#EA80FC",
+         font=("Arial", 9, "bold"), pady=4).pack(anchor="w", padx=12)
+frame_cart_risco = tk.Frame(frame_cart, bg="#0a0a14")
+frame_cart_risco.pack(fill="x", padx=4, pady=(0,4))
+
+# 10. Resumo executivo
+tk.Frame(frame_cart, bg="#1a1a2a", height=1).pack(fill="x", padx=10, pady=(4,0))
+tk.Label(frame_cart, text="📝  Resumo Executivo", bg="#050510", fg=ACCENT,
+         font=("Arial", 9, "bold"), pady=4).pack(anchor="w", padx=12)
+frame_cart_resumo = tk.Frame(frame_cart, bg="#0a0a14")
+frame_cart_resumo.pack(fill="x", padx=4, pady=(0,10))
+
+# ── Função de mensagens padrão (definida APÓS os frames existirem) ──
+def _init_carteira_frames():
+    """Preenche todos os frames da carteira com mensagens iniciais."""
+    msgs = [
+        (frame_cart_grafico,   "📉 Adicione ações e clique em ↻ Atualizar para ver a evolução."),
+        (frame_cart_benchmark, "📈 Adicione ações e clique em ↻ Atualizar para ver vs Benchmarks."),
+        (frame_cart_alertas,   "🔔 Adicione ações e clique em ↻ Atualizar para ver os alertas."),
+        (frame_cart_score,     "🎯 Adicione ações e clique em ↻ Atualizar para ver o score."),
+        (frame_cart_risco,     "📊 Adicione ações e clique em ↻ Atualizar para ver os indicadores."),
+        (frame_cart_resumo,    "📝 Adicione ações e clique em ↻ Atualizar para ver o resumo."),
+    ]
+    for frame, msg in msgs:
+        for w in frame.winfo_children(): w.destroy()
+        tk.Label(frame, text=msg, bg="#0a0a14", fg="#555555",
+                 font=("Arial", 8, "italic"), pady=8, anchor="w",
+                 padx=12).pack(fill="x")
 
 # ==============================
 # INICIALIZAR CHECKBOXES PADRÃO
@@ -2108,13 +2634,24 @@ for ticker in ATIVOS_PADRAO:
 # Mostra mensagem inicial no card de insights
 _montar_insights([], frame_insights)
 
-# Inicializa carteira se houver dados salvos
-if _carteira:
-    _atualizar_carteira_ui()
-else:
-    _renderizar_carteira({})
+# Inicializa todos os frames da carteira com mensagens padrão
+# _init_carteira_frames movida para após criação dos frames
+
+_init_carteira_frames()
+
+# Se já tem ações salvas, carrega tudo
+try:
+    if _carteira:
+        _atualizar_carteira_ui()
+    else:
+        _renderizar_carteira({})
+except Exception:
+    pass
 
 # Inicializa CDBs
-_renderizar_cdbs()
+try:
+    _renderizar_cdbs()
+except Exception:
+    pass
 
 root.mainloop()
